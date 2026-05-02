@@ -77,6 +77,7 @@ HTTP_USERID=YES
 HTTP_SLICE=NO
 HTTP_AUTOINDEX=YES
 HTTP_RANDOM_INDEX=NO
+HTTP_API=YES
 HTTP_STATUS=NO
 HTTP_GEO=YES
 HTTP_GEOIP=NO
@@ -261,6 +262,7 @@ $0: warning: the \"--with-ipv6\" option is deprecated"
         --with-http_degradation_module)  HTTP_DEGRADATION=YES       ;;
         --with-http_slice_module)        HTTP_SLICE=YES             ;;
 
+        --without-http_api_module)       HTTP_API=NO                ;;
         --without-http_charset_module)   HTTP_CHARSET=NO            ;;
         --without-http_gzip_module)      HTTP_GZIP=NO               ;;
         --without-http_ssi_module)       HTTP_SSI=NO                ;;
@@ -497,6 +499,7 @@ cat << END
   --without-http_auth_basic_module   disable ngx_http_auth_basic_module
   --without-http_mirror_module       disable ngx_http_mirror_module
   --without-http_autoindex_module    disable ngx_http_autoindex_module
+  --without-http_api_module          disable ngx_http_api_module
   --without-http_geo_module          disable ngx_http_geo_module
   --without-http_map_module          disable ngx_http_map_module
   --without-http_split_clients_module disable ngx_http_split_clients_module
