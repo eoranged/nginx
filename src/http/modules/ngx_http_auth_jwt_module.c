@@ -338,6 +338,10 @@ ngx_http_auth_jwt_handler(ngx_http_request_t *r)
 
             if (val.len == 0 || (val.len == 1 && val.data[0] == '0'))
             {
+                if (req[i].code == NGX_HTTP_UNAUTHORIZED) {
+                    goto unauthorized;
+                }
+
                 return req[i].code;
             }
         }
@@ -1259,6 +1263,10 @@ loaded:
         found = 1;
 
         if ((key.nbf && key.nbf > now) || (key.exp && key.exp <= now)) {
+            if (kid->len == 0) {
+                continue;
+            }
+
             return NGX_DECLINED;
         }
 
@@ -2106,11 +2114,12 @@ ngx_http_auth_jwt_require(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_http_auth_jwt_loc_conf_t *alcf = conf;
 
     ngx_str_t                    *value;
-    ngx_uint_t                    i, code;
+    ngx_uint_t                    i, code, n;
     ngx_http_auth_jwt_require_t  *req;
 
     value = cf->args->elts;
     code = NGX_HTTP_UNAUTHORIZED;
+    n = 0;
 
     if (alcf->requires == NGX_CONF_UNSET_PTR) {
         alcf->requires = ngx_array_create(cf->pool, 2,
@@ -2148,6 +2157,14 @@ ngx_http_auth_jwt_require(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                                &value[i]);
             return NGX_CONF_ERROR;
         }
+
+        n++;
+    }
+
+    if (n == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "auth_jwt_require requires at least one value");
+        return NGX_CONF_ERROR;
     }
 
     for (i = 1; i < cf->args->nelts; i++) {
