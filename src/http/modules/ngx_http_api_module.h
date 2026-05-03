@@ -40,6 +40,12 @@ typedef struct {
 } ngx_http_api_main_conf_t;
 
 
+typedef struct {
+    ngx_http_request_t           *request;
+    ngx_buf_t                    *buf;
+} ngx_http_api_prometheus_ctx_t;
+
+
 ngx_int_t ngx_http_api_send(ngx_http_request_t *r, ngx_buf_t *b);
 ngx_int_t ngx_http_api_send_prometheus(ngx_http_request_t *r, ngx_buf_t *b);
 ngx_int_t ngx_http_api_send_status(ngx_http_request_t *r, ngx_buf_t *b,
@@ -48,12 +54,14 @@ ngx_int_t ngx_http_api_send_no_content(ngx_http_request_t *r);
 ngx_buf_t *ngx_http_api_create_buffer(ngx_http_request_t *r);
 ngx_int_t ngx_http_api_read_body(ngx_http_request_t *r, ngx_str_t *body);
 ngx_int_t ngx_http_api_valid_name(ngx_str_t *name);
+ngx_int_t ngx_http_api_prometheus_append(ngx_http_api_prometheus_ctx_t *ctx,
+    const char *fmt, ...);
 
 ngx_int_t ngx_http_api_caches(ngx_http_request_t *r);
-u_char *ngx_http_api_prometheus_caches(u_char *p);
+ngx_int_t ngx_http_api_prometheus_caches(ngx_http_api_prometheus_ctx_t *ctx);
 void ngx_http_api_cache_log(ngx_http_request_t *r);
 ngx_int_t ngx_http_api_upstreams(ngx_http_request_t *r);
-u_char *ngx_http_api_prometheus_upstreams(u_char *p);
+ngx_int_t ngx_http_api_prometheus_upstreams(ngx_http_api_prometheus_ctx_t *ctx);
 ngx_int_t ngx_http_api_validate_upstream_names(ngx_conf_t *cf);
 ngx_int_t ngx_http_api_prometheus(ngx_http_request_t *r);
 

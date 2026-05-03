@@ -41,6 +41,21 @@ typedef struct ngx_resolver_s  ngx_resolver_t;
 
 
 typedef struct {
+    ngx_atomic_t              name;
+    ngx_atomic_t              srv;
+    ngx_atomic_t              addr;
+    ngx_atomic_t              noerror;
+    ngx_atomic_t              formerr;
+    ngx_atomic_t              servfail;
+    ngx_atomic_t              nxdomain;
+    ngx_atomic_t              notimp;
+    ngx_atomic_t              refused;
+    ngx_atomic_t              timedout;
+    ngx_atomic_t              unknown;
+} ngx_resolver_status_zone_t;
+
+
+typedef struct {
     ngx_connection_t         *udp;
     ngx_connection_t         *tcp;
     struct sockaddr          *sockaddr;
@@ -190,6 +205,20 @@ struct ngx_resolver_s {
     time_t                    expire;
     time_t                    valid;
 
+    ngx_str_t                 status_zone;
+    ngx_shm_zone_t           *status_zone_shm;
+    ngx_atomic_t              name;
+    ngx_atomic_t              srv;
+    ngx_atomic_t              addr;
+    ngx_atomic_t              noerror;
+    ngx_atomic_t              formerr;
+    ngx_atomic_t              servfail;
+    ngx_atomic_t              nxdomain;
+    ngx_atomic_t              notimp;
+    ngx_atomic_t              refused;
+    ngx_atomic_t              timedout;
+    ngx_atomic_t              unknown;
+
     ngx_uint_t                log_level;
 };
 
@@ -230,6 +259,8 @@ struct ngx_resolver_ctx_s {
 
 ngx_resolver_t *ngx_resolver_create(ngx_conf_t *cf, ngx_str_t *names,
     ngx_uint_t n);
+char *ngx_resolver_status_zone(ngx_conf_t *cf, ngx_resolver_t *r,
+    ngx_str_t *name);
 ngx_resolver_ctx_t *ngx_resolve_start(ngx_resolver_t *r,
     ngx_resolver_ctx_t *temp);
 ngx_int_t ngx_resolve_name(ngx_resolver_ctx_t *ctx);

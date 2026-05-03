@@ -106,6 +106,12 @@ static ngx_int_t ngx_resolver_copy(ngx_resolver_t *r, ngx_str_t *name,
 static ngx_int_t ngx_resolver_set_timeout(ngx_resolver_t *r,
     ngx_resolver_ctx_t *ctx);
 static void ngx_resolver_timeout_handler(ngx_event_t *ev);
+static ngx_int_t ngx_resolver_status_zone_init(ngx_shm_zone_t *shm_zone,
+    void *data);
+static void ngx_resolver_increment(ngx_resolver_t *r, ngx_atomic_t *fallback,
+    size_t offset);
+static void ngx_resolver_account_response(ngx_resolver_t *r,
+    ngx_uint_t code);
 static void ngx_resolver_free_node(ngx_resolver_t *r, ngx_resolver_node_t *rn);
 static void *ngx_resolver_alloc(ngx_resolver_t *r, size_t size);
 static void *ngx_resolver_calloc(ngx_resolver_t *r, size_t size);
@@ -309,6 +315,27 @@ ngx_resolver_create(ngx_conf_t *cf, ngx_str_t *names, ngx_uint_t n)
 }
 
 
+char *
+ngx_resolver_status_zone(ngx_conf_t *cf, ngx_resolver_t *r, ngx_str_t *name)
+{
+    ngx_shm_zone_t  *shm_zone;
+
+    shm_zone = ngx_shared_memory_add(cf, name, 8 * ngx_pagesize,
+                                     &ngx_resolver_status_zone_init);
+    if (shm_zone == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    shm_zone->init = ngx_resolver_status_zone_init;
+    shm_zone->data = NULL;
+
+    r->status_zone = *name;
+    r->status_zone_shm = shm_zone;
+
+    return NGX_CONF_OK;
+}
+
+
 static void
 ngx_resolver_cleanup(void *data)
 {
@@ -452,6 +479,9 @@ ngx_resolve_name(ngx_resolver_ctx_t *ctx)
     }
 
     if (ctx->service.len) {
+        ngx_resolver_increment(r, &r->srv,
+                               offsetof(ngx_resolver_status_zone_t, srv));
+
         slen = ctx->service.len;
 
         if (ngx_strlchr(ctx->service.data,
@@ -482,6 +512,9 @@ ngx_resolve_name(ngx_resolver_ctx_t *ctx)
         ngx_resolver_free(r, name.data);
 
     } else {
+        ngx_resolver_increment(r, &r->name,
+                               offsetof(ngx_resolver_status_zone_t, name));
+
         /* lock name mutex */
 
         rc = ngx_resolve_name_locked(r, ctx, &ctx->name);
@@ -951,6 +984,9 @@ ngx_resolve_addr(ngx_resolver_ctx_t *ctx)
 #endif
 
     r = ctx->resolver;
+
+    ngx_resolver_increment(r, &r->addr,
+                           offsetof(ngx_resolver_status_zone_t, addr));
 
     switch (ctx->addr.sockaddr->sa_family) {
 
@@ -1784,6 +1820,7 @@ ngx_resolver_process_response(ngx_resolver_t *r, u_char *buf, size_t n,
     code = flags & 0xf;
 
     if (code == NGX_RESOLVE_FORMERR) {
+        ngx_resolver_account_response(r, code);
 
         times = 0;
 
@@ -1816,6 +1853,7 @@ ngx_resolver_process_response(ngx_resolver_t *r, u_char *buf, size_t n,
     }
 
     if (code > NGX_RESOLVE_REFUSED) {
+        ngx_resolver_account_response(r, code);
         goto dns_error;
     }
 
@@ -1864,10 +1902,13 @@ found:
                    "resolver DNS response qt:%ui cl:%ui", qtype, qclass);
 
     if (qclass != 1) {
+        ngx_resolver_account_response(r, code);
         ngx_log_error(r->log_level, r->log, 0,
                       "unknown query class %ui in DNS response", qclass);
         return;
     }
+
+    ngx_resolver_account_response(r, code);
 
     switch (qtype) {
 
@@ -4101,8 +4142,95 @@ ngx_resolver_timeout_handler(ngx_event_t *ev)
     ctx = ev->data;
 
     ctx->state = NGX_RESOLVE_TIMEDOUT;
+    ngx_resolver_increment(ctx->resolver, &ctx->resolver->timedout,
+                           offsetof(ngx_resolver_status_zone_t, timedout));
 
     ctx->handler(ctx);
+}
+
+
+static ngx_int_t
+ngx_resolver_status_zone_init(ngx_shm_zone_t *shm_zone, void *data)
+{
+    ngx_slab_pool_t              *shpool;
+    ngx_resolver_status_zone_t   *status;
+
+    if (data) {
+        shm_zone->data = data;
+        return NGX_OK;
+    }
+
+    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+
+    status = ngx_slab_alloc(shpool, sizeof(ngx_resolver_status_zone_t));
+    if (status == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(status, sizeof(ngx_resolver_status_zone_t));
+    shm_zone->data = status;
+
+    return NGX_OK;
+}
+
+
+static void
+ngx_resolver_increment(ngx_resolver_t *r, ngx_atomic_t *fallback, size_t offset)
+{
+    ngx_atomic_t                 *counter;
+    ngx_resolver_status_zone_t   *status;
+
+    status = r->status_zone_shm ? r->status_zone_shm->data : NULL;
+
+    if (status) {
+        counter = (ngx_atomic_t *) ((u_char *) status + offset);
+        (void) ngx_atomic_fetch_add(counter, 1);
+        return;
+    }
+
+    (void) ngx_atomic_fetch_add(fallback, 1);
+}
+
+
+static void
+ngx_resolver_account_response(ngx_resolver_t *r, ngx_uint_t code)
+{
+    switch (code) {
+
+    case 0:
+        ngx_resolver_increment(r, &r->noerror,
+                               offsetof(ngx_resolver_status_zone_t, noerror));
+        break;
+
+    case NGX_RESOLVE_FORMERR:
+        ngx_resolver_increment(r, &r->formerr,
+                               offsetof(ngx_resolver_status_zone_t, formerr));
+        break;
+
+    case NGX_RESOLVE_SERVFAIL:
+        ngx_resolver_increment(r, &r->servfail,
+                               offsetof(ngx_resolver_status_zone_t, servfail));
+        break;
+
+    case NGX_RESOLVE_NXDOMAIN:
+        ngx_resolver_increment(r, &r->nxdomain,
+                               offsetof(ngx_resolver_status_zone_t, nxdomain));
+        break;
+
+    case NGX_RESOLVE_NOTIMP:
+        ngx_resolver_increment(r, &r->notimp,
+                               offsetof(ngx_resolver_status_zone_t, notimp));
+        break;
+
+    case NGX_RESOLVE_REFUSED:
+        ngx_resolver_increment(r, &r->refused,
+                               offsetof(ngx_resolver_status_zone_t, refused));
+        break;
+
+    default:
+        ngx_resolver_increment(r, &r->unknown,
+                               offsetof(ngx_resolver_status_zone_t, unknown));
+    }
 }
 
 

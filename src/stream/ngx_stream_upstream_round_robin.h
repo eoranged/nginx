@@ -50,6 +50,18 @@ struct ngx_stream_upstream_rr_peer_s {
     ngx_uint_t                       conns;
     ngx_uint_t                       max_conns;
 
+    ngx_atomic_t                     connections;
+    ngx_atomic_t                     sent;
+    ngx_atomic_t                     received;
+    ngx_atomic_t                     unavail;
+    ngx_msec_t                       connect_time;
+    ngx_msec_t                       first_byte_time;
+    ngx_msec_t                       response_time;
+    ngx_atomic_t                     health_checks;
+    ngx_atomic_t                     health_fails;
+    ngx_atomic_t                     health_unhealthy;
+    ngx_uint_t                       health_last_passed;
+
     ngx_uint_t                       fails;
     time_t                           accessed;
     time_t                           checked;
@@ -214,6 +226,7 @@ typedef struct {
     ngx_uint_t                       config;
     ngx_stream_upstream_rr_peers_t  *peers;
     ngx_stream_upstream_rr_peer_t   *current;
+    ngx_stream_upstream_state_t     *state;
     uintptr_t                       *tried;
     uintptr_t                        data;
 } ngx_stream_upstream_rr_peer_data_t;
@@ -229,6 +242,8 @@ ngx_int_t ngx_stream_upstream_get_round_robin_peer(ngx_peer_connection_t *pc,
     void *data);
 void ngx_stream_upstream_free_round_robin_peer(ngx_peer_connection_t *pc,
     void *data, ngx_uint_t state);
+void ngx_stream_upstream_rr_peer_stats(ngx_peer_connection_t *pc,
+    ngx_stream_upstream_state_t *state);
 
 
 #endif /* _NGX_STREAM_UPSTREAM_ROUND_ROBIN_H_INCLUDED_ */

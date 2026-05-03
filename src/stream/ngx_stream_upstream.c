@@ -691,16 +691,65 @@ ngx_stream_upstream_resolver(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_stream_upstream_srv_conf_t  *uscf = conf;
 
-    ngx_str_t  *value;
+    u_char     *p, *last;
+    ngx_str_t  *resolver, *value, status_zone;
+    ngx_uint_t  i, j;
 
     if (uscf->resolver) {
         return "is duplicate";
     }
 
     value = cf->args->elts;
+    resolver = ngx_pnalloc(cf->pool, (cf->args->nelts - 1) * sizeof(ngx_str_t));
+    if (resolver == NULL) {
+        return NGX_CONF_ERROR;
+    }
 
-    uscf->resolver = ngx_resolver_create(cf, &value[1], cf->args->nelts - 1);
+    ngx_str_null(&status_zone);
+    j = 0;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+        if (value[i].len > sizeof("status_zone=") - 1
+            && ngx_strncmp(value[i].data, "status_zone=",
+                           sizeof("status_zone=") - 1)
+               == 0)
+        {
+            status_zone.len = value[i].len - (sizeof("status_zone=") - 1);
+            status_zone.data = value[i].data + sizeof("status_zone=") - 1;
+            continue;
+        }
+
+        resolver[j++] = value[i];
+    }
+
+    if (j == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "no resolver address is defined");
+        return NGX_CONF_ERROR;
+    }
+
+    if (status_zone.len) {
+        last = status_zone.data + status_zone.len;
+
+        for (p = status_zone.data; p < last; p++) {
+            if (*p < 0x20 || *p == '/' || *p == '"' || *p == '\\') {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "invalid resolver status zone name \"%V\"",
+                                   &status_zone);
+                return NGX_CONF_ERROR;
+            }
+        }
+    }
+
+    uscf->resolver = ngx_resolver_create(cf, resolver, j);
     if (uscf->resolver == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    if (status_zone.len
+        && ngx_resolver_status_zone(cf, uscf->resolver, &status_zone)
+           != NGX_CONF_OK)
+    {
         return NGX_CONF_ERROR;
     }
 

@@ -89,8 +89,9 @@ static u_char *ngx_http_api_http_write_peer(u_char *p,
     ngx_http_upstream_rr_peer_t *peer, ngx_uint_t id, ngx_uint_t backup);
 static ngx_int_t ngx_http_api_http_write_servers(ngx_http_request_t *r,
     ngx_http_upstream_srv_conf_t *uscf);
-static u_char *ngx_http_api_http_prometheus_peer(u_char *p,
-    ngx_str_t *upstream, ngx_http_upstream_rr_peer_t *peer);
+static ngx_int_t ngx_http_api_http_prometheus_peer(
+    ngx_http_api_prometheus_ctx_t *ctx, ngx_str_t *upstream,
+    ngx_http_upstream_rr_peer_t *peer);
 static ngx_uint_t ngx_http_api_http_peer_state(
     ngx_http_upstream_rr_peer_t *peer);
 static ngx_int_t ngx_http_api_http_move_peer(
@@ -142,8 +143,9 @@ static u_char *ngx_http_api_stream_write_peer(u_char *p,
     ngx_stream_upstream_rr_peer_t *peer, ngx_uint_t id, ngx_uint_t backup);
 static ngx_int_t ngx_http_api_stream_write_servers(ngx_http_request_t *r,
     ngx_stream_upstream_srv_conf_t *uscf);
-static u_char *ngx_http_api_stream_prometheus_peer(u_char *p,
-    ngx_str_t *upstream, ngx_stream_upstream_rr_peer_t *peer);
+static ngx_int_t ngx_http_api_stream_prometheus_peer(
+    ngx_http_api_prometheus_ctx_t *ctx, ngx_str_t *upstream,
+    ngx_stream_upstream_rr_peer_t *peer);
 static ngx_uint_t ngx_http_api_stream_peer_state(
     ngx_stream_upstream_rr_peer_t *peer);
 static ngx_int_t ngx_http_api_stream_move_peer(
@@ -196,8 +198,8 @@ ngx_http_api_upstreams(ngx_http_request_t *r)
 }
 
 
-u_char *
-ngx_http_api_prometheus_upstreams(u_char *p)
+ngx_int_t
+ngx_http_api_prometheus_upstreams(ngx_http_api_prometheus_ctx_t *ctx)
 {
     ngx_uint_t                       i;
     ngx_http_upstream_rr_peer_t     *peer;
@@ -219,14 +221,22 @@ ngx_http_api_prometheus_upstreams(u_char *p)
             ngx_http_api_http_peers_rlock(peers);
 
             for (peer = peers->peer; peer; peer = peer->next) {
-                p = ngx_http_api_http_prometheus_peer(p, &uscfp[i]->host,
-                                                      peer);
+                if (ngx_http_api_http_prometheus_peer(ctx, &uscfp[i]->host,
+                                                      peer) != NGX_OK)
+                {
+                    ngx_http_api_http_peers_unlock(peers);
+                    return NGX_ERROR;
+                }
             }
 
             if (peers->next) {
                 for (peer = peers->next->peer; peer; peer = peer->next) {
-                    p = ngx_http_api_http_prometheus_peer(p, &uscfp[i]->host,
-                                                          peer);
+                    if (ngx_http_api_http_prometheus_peer(ctx,
+                        &uscfp[i]->host, peer) != NGX_OK)
+                    {
+                        ngx_http_api_http_peers_unlock(peers);
+                        return NGX_ERROR;
+                    }
                 }
             }
 
@@ -258,18 +268,24 @@ ngx_http_api_prometheus_upstreams(u_char *p)
                 ngx_http_api_stream_peers_rlock(speers);
 
                 for (speer = speers->peer; speer; speer = speer->next) {
-                    p = ngx_http_api_stream_prometheus_peer(p,
-                                                           &suscfp[i]->host,
-                                                           speer);
+                    if (ngx_http_api_stream_prometheus_peer(ctx,
+                        &suscfp[i]->host, speer) != NGX_OK)
+                    {
+                        ngx_http_api_stream_peers_unlock(speers);
+                        return NGX_ERROR;
+                    }
                 }
 
                 if (speers->next) {
                     for (speer = speers->next->peer; speer;
                          speer = speer->next)
                     {
-                        p = ngx_http_api_stream_prometheus_peer(p,
-                                                               &suscfp[i]->host,
-                                                               speer);
+                        if (ngx_http_api_stream_prometheus_peer(ctx,
+                            &suscfp[i]->host, speer) != NGX_OK)
+                        {
+                            ngx_http_api_stream_peers_unlock(speers);
+                            return NGX_ERROR;
+                        }
                     }
                 }
 
@@ -279,7 +295,7 @@ ngx_http_api_prometheus_upstreams(u_char *p)
     }
 #endif
 
-    return p;
+    return NGX_OK;
 }
 
 
@@ -1244,28 +1260,105 @@ ngx_http_api_http_write_servers(ngx_http_request_t *r,
 }
 
 
-static u_char *
-ngx_http_api_http_prometheus_peer(u_char *p, ngx_str_t *upstream,
+static ngx_int_t
+ngx_http_api_http_prometheus_peer(ngx_http_api_prometheus_ctx_t *ctx,
+    ngx_str_t *upstream,
     ngx_http_upstream_rr_peer_t *peer)
 {
-    ngx_str_t  *server;
+    ngx_str_t           *server;
+    ngx_atomic_uint_t    responses[5];
 
     server = peer->server.len ? &peer->server : &peer->name;
 
-    p = ngx_sprintf(p, "nginxplus_upstream_server_state"
-                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
-                    server, upstream, ngx_http_api_http_peer_state(peer));
-    p = ngx_sprintf(p, "nginxplus_upstream_server_active"
-                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
-                    server, upstream, peer->conns);
-    p = ngx_sprintf(p, "nginxplus_upstream_server_limit"
-                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
-                    server, upstream, peer->max_conns);
-    p = ngx_sprintf(p, "nginxplus_upstream_server_fails"
-                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
-                    server, upstream, peer->fails);
+    responses[0] = peer->responses[0];
+    responses[1] = peer->responses[1];
+    responses[2] = peer->responses[2];
+    responses[3] = peer->responses[3];
+    responses[4] = peer->responses[4];
 
-    return p;
+    if (responses[0] == 0 && responses[1] == 0 && responses[2] == 0
+        && responses[3] == 0 && responses[4] == 0
+        && peer->requests && peer->received)
+    {
+        responses[1] = peer->requests;
+    }
+
+    if (ngx_http_api_prometheus_append(ctx, "nginxplus_upstream_server_state"
+        "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+        server, upstream, ngx_http_api_http_peer_state(peer)) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_active"
+        "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+        server, upstream, peer->conns) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_limit"
+        "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+        server, upstream, peer->max_conns) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_requests"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->requests) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_responses"
+        "{code=\"1xx\",server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, responses[0]) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_responses"
+        "{code=\"2xx\",server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, responses[1]) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_responses"
+        "{code=\"3xx\",server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, responses[2]) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_responses"
+        "{code=\"4xx\",server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, responses[3]) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_responses"
+        "{code=\"5xx\",server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, responses[4]) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_sent"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->sent) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_received"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->received) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_fails"
+        "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+        server, upstream, peer->fails) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_unavail"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->unavail) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_header_time"
+        "{server=\"%V\",upstream=\"%V\"} %M" CRLF,
+        server, upstream, peer->header_time) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_response_time"
+        "{server=\"%V\",upstream=\"%V\"} %M" CRLF,
+        server, upstream, peer->response_time) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_health_checks_checks"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->health_checks) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_health_checks_fails"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->health_fails) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_upstream_server_health_checks_unhealthy"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->health_unhealthy) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
 }
 
 
@@ -2155,28 +2248,76 @@ ngx_http_api_stream_write_servers(ngx_http_request_t *r,
 }
 
 
-static u_char *
-ngx_http_api_stream_prometheus_peer(u_char *p, ngx_str_t *upstream,
+static ngx_int_t
+ngx_http_api_stream_prometheus_peer(ngx_http_api_prometheus_ctx_t *ctx,
+    ngx_str_t *upstream,
     ngx_stream_upstream_rr_peer_t *peer)
 {
     ngx_str_t  *server;
 
     server = peer->server.len ? &peer->server : &peer->name;
 
-    p = ngx_sprintf(p, "nginxplus_stream_upstream_server_state"
-                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
-                    server, upstream, ngx_http_api_stream_peer_state(peer));
-    p = ngx_sprintf(p, "nginxplus_stream_upstream_server_active"
-                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
-                    server, upstream, peer->conns);
-    p = ngx_sprintf(p, "nginxplus_stream_upstream_server_limit"
-                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
-                    server, upstream, peer->max_conns);
-    p = ngx_sprintf(p, "nginxplus_stream_upstream_server_fails"
-                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
-                    server, upstream, peer->fails);
+    if (ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_state"
+        "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+        server, upstream, ngx_http_api_stream_peer_state(peer)) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_active"
+        "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+        server, upstream, peer->conns) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_limit"
+        "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+        server, upstream, peer->max_conns) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_connections"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->connections) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_connect_time"
+        "{server=\"%V\",upstream=\"%V\"} %M" CRLF,
+        server, upstream, peer->connect_time) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_first_byte_time"
+        "{server=\"%V\",upstream=\"%V\"} %M" CRLF,
+        server, upstream, peer->first_byte_time) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_response_time"
+        "{server=\"%V\",upstream=\"%V\"} %M" CRLF,
+        server, upstream, peer->response_time) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_sent"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->sent) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_received"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->received) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_fails"
+        "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+        server, upstream, peer->fails) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_unavail"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->unavail) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_health_checks_checks"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->health_checks) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_health_checks_fails"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->health_fails) != NGX_OK
+        || ngx_http_api_prometheus_append(ctx,
+        "nginxplus_stream_upstream_server_health_checks_unhealthy"
+        "{server=\"%V\",upstream=\"%V\"} %uA" CRLF,
+        server, upstream, peer->health_unhealthy) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
 
-    return p;
+    return NGX_OK;
 }
 
 

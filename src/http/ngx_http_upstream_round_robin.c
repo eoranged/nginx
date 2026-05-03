@@ -22,6 +22,9 @@ static ngx_int_t ngx_http_upstream_create_sid(ngx_conf_t *cf,
 
 static ngx_http_upstream_rr_peer_t *ngx_http_upstream_get_peer(
     ngx_http_upstream_rr_peer_data_t *rrp, ngx_peer_connection_t *pc);
+static void ngx_http_upstream_rr_peer_update_stats(
+    ngx_http_upstream_rr_peer_t *peer, ngx_http_upstream_state_t *state,
+    ngx_uint_t peer_state);
 
 #if (NGX_HTTP_SSL)
 
@@ -1023,6 +1026,11 @@ ngx_http_upstream_free_round_robin_peer(ngx_peer_connection_t *pc, void *data,
     ngx_http_upstream_rr_peers_rlock(rrp->peers);
     ngx_http_upstream_rr_peer_lock(rrp->peers, peer);
 
+    if (rrp->state) {
+        ngx_http_upstream_rr_peer_update_stats(peer, rrp->state, state);
+        rrp->state = NULL;
+    }
+
     if (rrp->peers->single) {
 
         if (peer->fails) {
@@ -1052,6 +1060,8 @@ ngx_http_upstream_free_round_robin_peer(ngx_peer_connection_t *pc, void *data,
             peer->effective_weight -= peer->weight / peer->max_fails;
 
             if (peer->fails >= peer->max_fails) {
+                peer->unavail++;
+
                 ngx_log_error(NGX_LOG_WARN, pc->log, 0,
                               "upstream server temporarily disabled");
             }
@@ -1084,6 +1094,60 @@ ngx_http_upstream_free_round_robin_peer(ngx_peer_connection_t *pc, void *data,
 
     if (pc->tries) {
         pc->tries--;
+    }
+}
+
+
+void
+ngx_http_upstream_rr_peer_stats(ngx_peer_connection_t *pc,
+    ngx_http_upstream_state_t *state)
+{
+    ngx_http_upstream_rr_peer_data_t  *rrp;
+
+    if (pc == NULL || pc->data == NULL || state == NULL) {
+        return;
+    }
+
+    rrp = pc->data;
+    rrp->state = state;
+}
+
+
+static void
+ngx_http_upstream_rr_peer_update_stats(ngx_http_upstream_rr_peer_t *peer,
+    ngx_http_upstream_state_t *state, ngx_uint_t peer_state)
+{
+    ngx_uint_t  code;
+
+    if (state == NULL) {
+        return;
+    }
+
+    peer->requests++;
+    peer->sent += state->bytes_sent;
+    peer->received += state->bytes_received;
+
+    if (state->bytes_received == 0) {
+        peer->received += state->response_length;
+    }
+
+    if (state->header_time != (ngx_msec_t) -1) {
+        peer->header_time = state->header_time;
+    }
+
+    if (state->response_time != (ngx_msec_t) -1) {
+        peer->response_time = state->response_time;
+    }
+
+    code = state->status;
+
+    if (code == 0 && peer_state == 0) {
+        code = NGX_HTTP_OK;
+    }
+
+    if (code >= 100 && code < 600) {
+        code = code / 100 - 1;
+        peer->responses[code]++;
     }
 }
 

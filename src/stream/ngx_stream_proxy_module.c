@@ -8,6 +8,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_stream.h>
+#include <ngx_stream_upstream_round_robin.h>
 
 
 typedef struct {
@@ -2201,6 +2202,10 @@ ngx_stream_proxy_next_upstream(ngx_stream_session_t *s)
     }
 
     if (u->peer.sockaddr) {
+        if (u->peer.free == ngx_stream_upstream_free_round_robin_peer) {
+            ngx_stream_upstream_rr_peer_stats(&u->peer, u->state);
+        }
+
         u->peer.free(&u->peer, u->peer.data, NGX_PEER_FAILED);
         u->peer.sockaddr = NULL;
     }
@@ -2282,6 +2287,10 @@ ngx_stream_proxy_finalize(ngx_stream_session_t *s, ngx_uint_t rc)
             && (pc->read->error || pc->write->error))
         {
             state = NGX_PEER_FAILED;
+        }
+
+        if (u->peer.free == ngx_stream_upstream_free_round_robin_peer) {
+            ngx_stream_upstream_rr_peer_stats(&u->peer, u->state);
         }
 
         u->peer.free(&u->peer, u->peer.data, state);

@@ -1131,6 +1131,8 @@ ngx_http_upstream_hc_update(ngx_http_upstream_hc_peer_t *hp, ngx_int_t ok)
 #endif
 
     if (ok == NGX_OK) {
+        peer->health_checks++;
+        peer->health_last_passed = 1;
         hp->fails = 0;
 
         if (hp->passes < hp->conf->passes) {
@@ -1142,6 +1144,9 @@ ngx_http_upstream_hc_update(ngx_http_upstream_hc_peer_t *hp, ngx_int_t ok)
         }
 
     } else {
+        peer->health_checks++;
+        peer->health_fails++;
+        peer->health_last_passed = 0;
         hp->passes = 0;
 
         if (hp->fails < hp->conf->fails) {
@@ -1149,6 +1154,10 @@ ngx_http_upstream_hc_update(ngx_http_upstream_hc_peer_t *hp, ngx_int_t ok)
         }
 
         if (hp->fails >= hp->conf->fails) {
+            if (!(peer->down & NGX_HTTP_UPSTREAM_HC_DOWN)) {
+                peer->health_unhealthy++;
+            }
+
             peer->down |= NGX_HTTP_UPSTREAM_HC_DOWN;
         }
     }
