@@ -19,6 +19,9 @@ static ngx_http_upstream_rr_peers_t *ngx_http_upstream_zone_copy_peers(
     ngx_http_upstream_srv_conf_t *ouscf);
 static ngx_http_upstream_rr_peer_t *ngx_http_upstream_zone_copy_peer(
     ngx_http_upstream_rr_peers_t *peers, ngx_http_upstream_rr_peer_t *src);
+static void ngx_http_upstream_zone_copy_hc(
+    ngx_http_upstream_rr_peers_t *peers,
+    ngx_http_upstream_rr_peers_t *opeers);
 static ngx_int_t ngx_http_upstream_zone_preresolve(
     ngx_http_upstream_rr_peer_t *resolve,
     ngx_http_upstream_rr_peers_t *peers,
@@ -280,6 +283,8 @@ ngx_http_upstream_zone_copy_peers(ngx_slab_pool_t *shpool,
         (*peers->config)++;
     }
 
+    ngx_http_upstream_zone_copy_hc(peers, opeers);
+
     for (peerp = &peers->resolve; *peerp; peerp = &peer->next) {
         peer = ngx_http_upstream_zone_copy_peer(peers, *peerp);
         if (peer == NULL) {
@@ -326,6 +331,8 @@ ngx_http_upstream_zone_copy_peers(ngx_slab_pool_t *shpool,
         *peerp = peer;
         (*backup->config)++;
     }
+
+    ngx_http_upstream_zone_copy_hc(backup, opeers ? opeers->next : NULL);
 
     for (peerp = &backup->resolve; *peerp; peerp = &peer->next) {
         peer = ngx_http_upstream_zone_copy_peer(backup, *peerp);
@@ -490,6 +497,54 @@ failed:
     ngx_slab_free_locked(pool, dst);
 
     return NULL;
+}
+
+
+static void
+ngx_http_upstream_zone_copy_hc(ngx_http_upstream_rr_peers_t *peers,
+    ngx_http_upstream_rr_peers_t *opeers)
+{
+    ngx_http_upstream_rr_peer_t  *peer, *opeer;
+
+    if (opeers == NULL) {
+        return;
+    }
+
+    peers->hc_active = opeers->hc_active;
+
+    if (!opeers->hc_active) {
+        return;
+    }
+
+    ngx_http_upstream_rr_peers_rlock(opeers);
+
+    for (peer = peers->peer; peer; peer = peer->next) {
+        peer->down |= NGX_HTTP_UPSTREAM_HC_DOWN;
+
+        for (opeer = opeers->peer; opeer; opeer = opeer->next) {
+
+            if (peer->server.len != opeer->server.len
+                || ngx_memcmp(peer->server.data, opeer->server.data,
+                              peer->server.len)
+                   != 0)
+            {
+                continue;
+            }
+
+            if (ngx_cmp_sockaddr(peer->sockaddr, peer->socklen,
+                                 opeer->sockaddr, opeer->socklen, 1)
+                != NGX_OK)
+            {
+                continue;
+            }
+
+            peer->down &= ~NGX_HTTP_UPSTREAM_HC_DOWN;
+            peer->down |= opeer->down & NGX_HTTP_UPSTREAM_HC_DOWN;
+            break;
+        }
+    }
+
+    ngx_http_upstream_rr_peers_unlock(opeers);
 }
 
 

@@ -15,6 +15,7 @@
 
 
 #define NGX_STREAM_UPSTREAM_FAILED      1
+#define NGX_STREAM_UPSTREAM_HC_DOWN     2
 
 
 typedef struct ngx_stream_upstream_rr_peers_s  ngx_stream_upstream_rr_peers_t;
@@ -85,6 +86,7 @@ struct ngx_stream_upstream_rr_peers_s {
     ngx_slab_pool_t                 *shpool;
     ngx_atomic_t                     rwlock;
     ngx_uint_t                      *config;
+    ngx_uint_t                       hc_active;
     ngx_stream_upstream_rr_peer_t   *resolve;
     ngx_stream_upstream_rr_peers_t  *zone_next;
 #endif

@@ -19,6 +19,7 @@
 #endif
 
 #define NGX_HTTP_UPSTREAM_FAILED     1
+#define NGX_HTTP_UPSTREAM_HC_DOWN    2
 
 #if (NGX_HTTP_UPSTREAM_STICKY)
 #define NGX_HTTP_UPSTREAM_DRAINING   8
@@ -103,6 +104,7 @@ struct ngx_http_upstream_rr_peers_s {
     ngx_slab_pool_t                *shpool;
     ngx_atomic_t                    rwlock;
     ngx_uint_t                     *config;
+    ngx_uint_t                      hc_active;
     ngx_http_upstream_rr_peer_t    *resolve;
     ngx_http_upstream_rr_peers_t   *zone_next;
 #endif

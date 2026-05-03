@@ -153,6 +153,7 @@ typedef struct {
 
 ngx_stream_upstream_srv_conf_t *ngx_stream_upstream_add(ngx_conf_t *cf,
     ngx_url_t *u, ngx_uint_t flags);
+ngx_stream_upstream_srv_conf_t *ngx_stream_proxy_get_upstream(ngx_conf_t *cf);
 
 
 #define ngx_stream_conf_upstream_srv_conf(uscf, module)                       \

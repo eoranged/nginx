@@ -961,6 +961,17 @@ if [ $HTTP = YES ]; then
         . auto/module
     fi
 
+    if [ $HTTP_UPSTREAM_HC = YES -a $HTTP_PROXY = YES ]; then
+        ngx_module_name=ngx_http_upstream_hc_module
+        ngx_module_incs=
+        ngx_module_deps=
+        ngx_module_srcs=src/http/modules/ngx_http_upstream_hc_module.c
+        ngx_module_libs=
+        ngx_module_link=$HTTP_UPSTREAM_HC
+
+        . auto/module
+    fi
+
     if [ $HTTP_UPSTREAM_STICKY = YES ]; then
         have=NGX_HTTP_UPSTREAM_STICKY . auto/have
         have=NGX_HTTP_UPSTREAM_SID . auto/have
@@ -1260,6 +1271,16 @@ if [ $STREAM != NO ]; then
         ngx_module_srcs=src/stream/ngx_stream_upstream_zone_module.c
         ngx_module_libs=
         ngx_module_link=$STREAM_UPSTREAM_ZONE
+
+        . auto/module
+    fi
+
+    if [ $STREAM_UPSTREAM_HC = YES ]; then
+        ngx_module_name=ngx_stream_upstream_hc_module
+        ngx_module_deps=
+        ngx_module_srcs=src/stream/ngx_stream_upstream_hc_module.c
+        ngx_module_libs=
+        ngx_module_link=$STREAM_UPSTREAM_HC
 
         . auto/module
     fi

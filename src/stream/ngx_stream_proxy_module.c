@@ -2747,6 +2747,21 @@ ngx_stream_proxy_pass(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+ngx_stream_upstream_srv_conf_t *
+ngx_stream_proxy_get_upstream(ngx_conf_t *cf)
+{
+    ngx_stream_proxy_srv_conf_t  *pscf;
+
+    pscf = ngx_stream_conf_get_module_srv_conf(cf, ngx_stream_proxy_module);
+
+    if (pscf->upstream_value) {
+        return NULL;
+    }
+
+    return pscf->upstream;
+}
+
+
 static char *
 ngx_stream_proxy_bind(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
