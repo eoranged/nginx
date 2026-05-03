@@ -27,15 +27,14 @@
 
 typedef struct {
     ngx_str_t                  name;
-    ngx_str_t                  key;
+    ngx_array_t               *keys;
     ngx_uint_t                 type;
 } ngx_http_auth_jwt_var_t;
 
 
 typedef struct {
     ngx_http_complex_value_t   left;
-    ngx_http_complex_value_t   right;
-    ngx_uint_t                 has_right;
+    ngx_uint_t                 code;
 } ngx_http_auth_jwt_require_t;
 
 
@@ -45,6 +44,9 @@ typedef struct {
     ngx_http_complex_value_t  *key_file;
     ngx_http_complex_value_t  *key_request;
     time_t                    key_cache;
+    ngx_str_t                 cache_key;
+    ngx_str_t                 cache;
+    time_t                    cache_expire;
     ngx_uint_t                type;
     ngx_array_t              *vars;
     ngx_array_t              *requires;
@@ -56,15 +58,25 @@ typedef struct {
     ngx_str_t                  kty;
     ngx_str_t                  k;
     ngx_str_t                  pem;
+    ngx_str_t                  n;
+    ngx_str_t                  e;
+    ngx_str_t                  x;
+    ngx_str_t                  y;
+    ngx_str_t                  crv;
     time_t                     nbf;
     time_t                     exp;
 } ngx_http_auth_jwt_key_t;
 
 
 typedef struct {
+    ngx_uint_t                 done;
+    ngx_uint_t                 status;
+    ngx_http_request_t        *subrequest;
     ngx_array_t               *header;
     ngx_array_t               *payload;
+    ngx_str_t                  header_json;
     ngx_str_t                  payload_json;
+    ngx_str_t                  request_jwks;
 } ngx_http_auth_jwt_ctx_t;
 
 
@@ -93,10 +105,15 @@ static ngx_int_t ngx_http_auth_jwt_conf_variable(ngx_http_request_t *r,
 
 static ngx_int_t ngx_http_auth_jwt_validate(ngx_http_request_t *r,
     ngx_http_auth_jwt_loc_conf_t *alcf, ngx_str_t *token,
-    ngx_http_auth_jwt_ctx_t **out);
+    ngx_http_auth_jwt_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_jwt_verify(ngx_http_request_t *r,
-    ngx_http_auth_jwt_loc_conf_t *alcf, ngx_str_t *alg, ngx_str_t *kid,
-    ngx_str_t *signed_data, ngx_str_t *signature);
+    ngx_http_auth_jwt_loc_conf_t *alcf, ngx_http_auth_jwt_ctx_t *ctx,
+    ngx_str_t *alg, ngx_str_t *kid, ngx_str_t *signed_data,
+    ngx_str_t *signature);
+static ngx_int_t ngx_http_auth_jwt_key_request(ngx_http_request_t *r,
+    ngx_http_auth_jwt_loc_conf_t *alcf, ngx_http_auth_jwt_ctx_t *ctx);
+static ngx_int_t ngx_http_auth_jwt_key_request_done(ngx_http_request_t *r,
+    void *data, ngx_int_t rc);
 
 static ngx_int_t ngx_http_auth_jwt_json_get(ngx_pool_t *pool, ngx_str_t *json,
     ngx_str_t *name, ngx_str_t *value);
@@ -104,6 +121,8 @@ static ngx_int_t ngx_http_auth_jwt_json_pairs(ngx_pool_t *pool,
     ngx_str_t *json, ngx_array_t **out);
 static ngx_int_t ngx_http_auth_jwt_array_value(ngx_array_t *a,
     ngx_str_t *name, ngx_str_t *value);
+static ngx_int_t ngx_http_auth_jwt_json_lookup(ngx_pool_t *pool,
+    ngx_str_t *json, ngx_array_t *names, ngx_str_t *value);
 
 
 static ngx_command_t  ngx_http_auth_jwt_commands[] = {
@@ -144,7 +163,7 @@ static ngx_command_t  ngx_http_auth_jwt_commands[] = {
       NULL },
 
     { ngx_string("auth_jwt_claim_set"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE2,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_2MORE,
       ngx_http_auth_jwt_set,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -152,7 +171,7 @@ static ngx_command_t  ngx_http_auth_jwt_commands[] = {
       },
 
     { ngx_string("auth_jwt_header_set"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE2,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_2MORE,
       ngx_http_auth_jwt_set,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -160,7 +179,7 @@ static ngx_command_t  ngx_http_auth_jwt_commands[] = {
       },
 
     { ngx_string("auth_jwt_require"),
-      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE12,
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
       ngx_http_auth_jwt_require,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -234,6 +253,39 @@ ngx_http_auth_jwt_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
+    ctx = ngx_http_get_module_ctx(r, ngx_http_auth_jwt_module);
+
+    if (ctx && ctx->subrequest) {
+        if (!ctx->done) {
+            return NGX_AGAIN;
+        }
+
+        if (ctx->status < NGX_HTTP_OK
+            || ctx->status >= NGX_HTTP_SPECIAL_RESPONSE
+            || ctx->subrequest->out == NULL
+            || ctx->subrequest->out->buf == NULL)
+        {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "auth_jwt_key_request unexpected status: %ui",
+                          ctx->status);
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        ctx->request_jwks.data = ctx->subrequest->out->buf->pos;
+        ctx->request_jwks.len = ctx->subrequest->out->buf->last
+                                - ctx->subrequest->out->buf->pos;
+        ctx->subrequest = NULL;
+    }
+
+    if (ctx == NULL) {
+        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_auth_jwt_ctx_t));
+        if (ctx == NULL) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        ngx_http_set_ctx(r, ctx, ngx_http_auth_jwt_module);
+    }
+
     ngx_str_null(&token);
 
     if (alcf->token) {
@@ -262,17 +314,19 @@ ngx_http_auth_jwt_handler(ngx_http_request_t *r)
         goto unauthorized;
     }
 
-    rc = ngx_http_auth_jwt_validate(r, alcf, &token, &ctx);
+    rc = ngx_http_auth_jwt_validate(r, alcf, &token, ctx);
 
     if (rc == NGX_ERROR) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    if (rc == NGX_AGAIN) {
+        return NGX_AGAIN;
+    }
+
     if (rc != NGX_OK) {
         goto unauthorized;
     }
-
-    ngx_http_set_ctx(r, ctx, ngx_http_auth_jwt_module);
 
     if (alcf->requires) {
         req = alcf->requires->elts;
@@ -282,24 +336,9 @@ ngx_http_auth_jwt_handler(ngx_http_request_t *r)
                 return NGX_HTTP_INTERNAL_SERVER_ERROR;
             }
 
-            if (!req[i].has_right) {
-                if (val.len == 0
-                    || (val.len == 1 && val.data[0] == '0'))
-                {
-                    return NGX_HTTP_FORBIDDEN;
-                }
-
-                continue;
-            }
-
-            if (ngx_http_complex_value(r, &req[i].right, &realm) != NGX_OK) {
-                return NGX_HTTP_INTERNAL_SERVER_ERROR;
-            }
-
-            if (val.len != realm.len
-                || ngx_strncmp(val.data, realm.data, val.len) != 0)
+            if (val.len == 0 || (val.len == 1 && val.data[0] == '0'))
             {
-                return NGX_HTTP_FORBIDDEN;
+                return req[i].code;
             }
         }
     }
@@ -314,9 +353,10 @@ unauthorized:
     }
 
     h->hash = 1;
+    h->next = NULL;
     ngx_str_set(&h->key, "WWW-Authenticate");
     h->value.len = sizeof("Bearer realm=\"\"") - 1 + realm.len;
-    h->value.data = ngx_pnalloc(r->pool, h->value.len);
+    h->value.data = ngx_pnalloc(r->pool, h->value.len + 1);
     if (h->value.data == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -331,13 +371,12 @@ unauthorized:
 static ngx_int_t
 ngx_http_auth_jwt_validate(ngx_http_request_t *r,
     ngx_http_auth_jwt_loc_conf_t *alcf, ngx_str_t *token,
-    ngx_http_auth_jwt_ctx_t **out)
+    ngx_http_auth_jwt_ctx_t *ctx)
 {
     time_t                    now, n;
     ngx_str_t                 p[5], alg, kid, exp, nbf, iat;
     ngx_str_t                 header64, payload64, sig64, signed_data;
     ngx_uint_t                i, parts;
-    ngx_http_auth_jwt_ctx_t  *ctx;
 
     parts = 1;
     p[0].data = token->data;
@@ -362,11 +401,6 @@ ngx_http_auth_jwt_validate(ngx_http_request_t *r,
 
     if (parts != 3 || p[0].len == 0 || p[1].len == 0 || p[2].len == 0) {
         return NGX_DECLINED;
-    }
-
-    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_auth_jwt_ctx_t));
-    if (ctx == NULL) {
-        return NGX_ERROR;
     }
 
     header64 = p[0];
@@ -394,6 +428,7 @@ ngx_http_auth_jwt_validate(ngx_http_request_t *r,
         return NGX_DECLINED;
     }
 
+    ctx->header_json = p[0];
     ctx->payload_json = p[1];
 
     ngx_str_set(&alg, "alg");
@@ -409,10 +444,15 @@ ngx_http_auth_jwt_validate(ngx_http_request_t *r,
     signed_data.data = token->data;
     signed_data.len = header64.len + 1 + payload64.len;
 
-    n = ngx_http_auth_jwt_verify(r, alcf, &alg, &kid, &signed_data, &p[2]);
+    n = ngx_http_auth_jwt_verify(r, alcf, ctx, &alg, &kid, &signed_data,
+                                  &p[2]);
 
     if (n == NGX_ERROR) {
         return NGX_ERROR;
+    }
+
+    if (n == NGX_AGAIN) {
+        return NGX_AGAIN;
     }
 
     if (n != NGX_OK) {
@@ -445,8 +485,6 @@ ngx_http_auth_jwt_validate(ngx_http_request_t *r,
         }
     }
 
-    *out = ctx;
-
     return NGX_OK;
 }
 
@@ -460,8 +498,17 @@ ngx_http_auth_jwt_read_file(ngx_http_request_t *r, ngx_str_t *name,
     ngx_fd_t         fd;
     ngx_file_t       file;
     ngx_file_info_t  fi;
+    u_char          *path;
 
-    fd = ngx_open_file(name->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+    path = ngx_pnalloc(r->pool, name->len + 1);
+    if (path == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(path, name->data, name->len);
+    path[name->len] = '\0';
+
+    fd = ngx_open_file(path, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
     if (fd == NGX_INVALID_FILE) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
                       ngx_open_file_n " \"%V\" failed", name);
@@ -591,6 +638,26 @@ ngx_http_auth_jwt_next_key(ngx_pool_t *pool, ngx_str_t *jwks, ngx_uint_t *pos,
         ngx_str_null(&key->pem);
     }
 
+    if (ngx_http_auth_jwt_key_value(pool, &obj, "n", &key->n) != NGX_OK) {
+        ngx_str_null(&key->n);
+    }
+
+    if (ngx_http_auth_jwt_key_value(pool, &obj, "e", &key->e) != NGX_OK) {
+        ngx_str_null(&key->e);
+    }
+
+    if (ngx_http_auth_jwt_key_value(pool, &obj, "x", &key->x) != NGX_OK) {
+        ngx_str_null(&key->x);
+    }
+
+    if (ngx_http_auth_jwt_key_value(pool, &obj, "y", &key->y) != NGX_OK) {
+        ngx_str_null(&key->y);
+    }
+
+    if (ngx_http_auth_jwt_key_value(pool, &obj, "crv", &key->crv) != NGX_OK) {
+        ngx_str_null(&key->crv);
+    }
+
     if (ngx_http_auth_jwt_key_value(pool, &obj, "nbf", &v) == NGX_OK) {
         key->nbf = ngx_atoi(v.data, v.len);
     }
@@ -631,6 +698,22 @@ ngx_http_auth_jwt_alg_is(ngx_str_t *alg, char *name)
 
 
 static ngx_int_t
+ngx_http_auth_jwt_mem_eq(u_char *a, u_char *b, size_t len)
+{
+    u_char    diff;
+    ngx_uint_t i;
+
+    diff = 0;
+
+    for (i = 0; i < len; i++) {
+        diff |= a[i] ^ b[i];
+    }
+
+    return diff == 0 ? NGX_OK : NGX_DECLINED;
+}
+
+
+static ngx_int_t
 ngx_http_auth_jwt_hmac(ngx_http_request_t *r, ngx_http_auth_jwt_key_t *key,
     ngx_str_t *signed_data, ngx_str_t *signature)
 {
@@ -658,7 +741,9 @@ ngx_http_auth_jwt_hmac(ngx_http_request_t *r, ngx_http_auth_jwt_key_t *key,
         return NGX_ERROR;
     }
 
-    if (signature->len != mdlen || ngx_memcmp(signature->data, md, mdlen) != 0) {
+    if (signature->len != mdlen
+        || ngx_http_auth_jwt_mem_eq(signature->data, md, mdlen) != NGX_OK)
+    {
         return NGX_DECLINED;
     }
 
@@ -729,20 +814,181 @@ ngx_http_auth_jwt_ecdsa_der(ngx_http_request_t *r, ngx_str_t *raw,
 }
 
 
+static BIGNUM *
+ngx_http_auth_jwt_bignum(ngx_http_request_t *r, ngx_str_t *value)
+{
+    ngx_str_t  raw;
+
+    raw.data = ngx_pnalloc(r->pool, ngx_base64_decoded_length(value->len));
+    if (raw.data == NULL) {
+        return NULL;
+    }
+
+    if (ngx_decode_base64url(&raw, value) != NGX_OK) {
+        return NULL;
+    }
+
+    return BN_bin2bn(raw.data, raw.len, NULL);
+}
+
+
+static EVP_PKEY *
+ngx_http_auth_jwt_rsa_pkey(ngx_http_request_t *r,
+    ngx_http_auth_jwt_key_t *key)
+{
+    RSA       *rsa;
+    BIGNUM    *n, *e;
+    EVP_PKEY  *pkey;
+
+    if (key->n.len == 0 || key->e.len == 0) {
+        return NULL;
+    }
+
+    n = ngx_http_auth_jwt_bignum(r, &key->n);
+    e = ngx_http_auth_jwt_bignum(r, &key->e);
+    rsa = RSA_new();
+
+    if (n == NULL || e == NULL || rsa == NULL) {
+        if (n) {
+            BN_free(n);
+        }
+        if (e) {
+            BN_free(e);
+        }
+        if (rsa) {
+            RSA_free(rsa);
+        }
+        return NULL;
+    }
+
+    if (RSA_set0_key(rsa, n, e, NULL) != 1) {
+        BN_free(n);
+        BN_free(e);
+        RSA_free(rsa);
+        return NULL;
+    }
+
+    pkey = EVP_PKEY_new();
+    if (pkey == NULL) {
+        RSA_free(rsa);
+        return NULL;
+    }
+
+    if (EVP_PKEY_assign_RSA(pkey, rsa) != 1) {
+        RSA_free(rsa);
+        EVP_PKEY_free(pkey);
+        return NULL;
+    }
+
+    return pkey;
+}
+
+
+static EVP_PKEY *
+ngx_http_auth_jwt_ec_pkey(ngx_http_request_t *r, ngx_http_auth_jwt_key_t *key)
+{
+    EC_KEY    *ec;
+    BIGNUM    *x, *y;
+    EVP_PKEY  *pkey;
+
+    if (key->x.len == 0 || key->y.len == 0
+        || key->crv.len != sizeof("P-256") - 1
+        || ngx_strncmp(key->crv.data, "P-256", sizeof("P-256") - 1) != 0)
+    {
+        return NULL;
+    }
+
+    x = ngx_http_auth_jwt_bignum(r, &key->x);
+    y = ngx_http_auth_jwt_bignum(r, &key->y);
+    ec = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+
+    if (x == NULL || y == NULL || ec == NULL) {
+        if (x) {
+            BN_free(x);
+        }
+        if (y) {
+            BN_free(y);
+        }
+        if (ec) {
+            EC_KEY_free(ec);
+        }
+        return NULL;
+    }
+
+    if (EC_KEY_set_public_key_affine_coordinates(ec, x, y) != 1) {
+        BN_free(x);
+        BN_free(y);
+        EC_KEY_free(ec);
+        return NULL;
+    }
+
+    BN_free(x);
+    BN_free(y);
+
+    pkey = EVP_PKEY_new();
+    if (pkey == NULL) {
+        EC_KEY_free(ec);
+        return NULL;
+    }
+
+    if (EVP_PKEY_assign_EC_KEY(pkey, ec) != 1) {
+        EC_KEY_free(ec);
+        EVP_PKEY_free(pkey);
+        return NULL;
+    }
+
+    return pkey;
+}
+
+
+static EVP_PKEY *
+ngx_http_auth_jwt_pkey(ngx_http_request_t *r, ngx_http_auth_jwt_key_t *key,
+    ngx_str_t *alg)
+{
+    BIO       *bio;
+    EVP_PKEY  *pkey;
+
+    if (ngx_http_auth_jwt_alg_is(alg, "RS256")
+        || ngx_http_auth_jwt_alg_is(alg, "PS256"))
+    {
+        pkey = ngx_http_auth_jwt_rsa_pkey(r, key);
+        if (pkey) {
+            return pkey;
+        }
+    }
+
+    if (ngx_http_auth_jwt_alg_is(alg, "ES256")) {
+        pkey = ngx_http_auth_jwt_ec_pkey(r, key);
+        if (pkey) {
+            return pkey;
+        }
+    }
+
+    if (key->pem.len == 0) {
+        return NULL;
+    }
+
+    bio = BIO_new_mem_buf(key->pem.data, (int) key->pem.len);
+    if (bio == NULL) {
+        return NULL;
+    }
+
+    pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+
+    return pkey;
+}
+
+
 static ngx_int_t
 ngx_http_auth_jwt_evp(ngx_http_request_t *r, ngx_http_auth_jwt_key_t *key,
     ngx_str_t *alg, ngx_str_t *signed_data, ngx_str_t *signature)
 {
     int           rc;
     ngx_str_t     sig;
-    BIO          *bio;
     EVP_PKEY     *pkey;
     EVP_MD_CTX   *ctx;
     EVP_PKEY_CTX *pctx;
-
-    if (key->pem.len == 0) {
-        return NGX_DECLINED;
-    }
 
     sig = *signature;
 
@@ -753,14 +999,7 @@ ngx_http_auth_jwt_evp(ngx_http_request_t *r, ngx_http_auth_jwt_key_t *key,
         }
     }
 
-    bio = BIO_new_mem_buf(key->pem.data, (int) key->pem.len);
-    if (bio == NULL) {
-        return NGX_ERROR;
-    }
-
-    pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
-    BIO_free(bio);
-
+    pkey = ngx_http_auth_jwt_pkey(r, key, alg);
     if (pkey == NULL) {
         return NGX_DECLINED;
     }
@@ -781,7 +1020,7 @@ ngx_http_auth_jwt_evp(ngx_http_request_t *r, ngx_http_auth_jwt_key_t *key,
 
     if (ngx_http_auth_jwt_alg_is(alg, "PS256")) {
         if (EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) != 1
-            || EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, -2) != 1)
+            || EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, 32) != 1)
         {
             EVP_MD_CTX_free(ctx);
             return NGX_ERROR;
@@ -800,9 +1039,131 @@ ngx_http_auth_jwt_evp(ngx_http_request_t *r, ngx_http_auth_jwt_key_t *key,
 
 
 static ngx_int_t
+ngx_http_auth_jwt_key_cache_save(ngx_http_request_t *r,
+    ngx_http_auth_jwt_loc_conf_t *alcf, ngx_str_t *key, ngx_str_t *jwks)
+{
+    u_char  *p;
+    u_char  *k;
+
+    if (alcf->key_cache == 0 || jwks->len == 0) {
+        return NGX_OK;
+    }
+
+    p = ngx_alloc(jwks->len, r->connection->log);
+    if (p == NULL) {
+        return NGX_ERROR;
+    }
+
+    k = ngx_alloc(key->len, r->connection->log);
+    if (k == NULL) {
+        ngx_free(p);
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(p, jwks->data, jwks->len);
+    ngx_memcpy(k, key->data, key->len);
+
+    if (alcf->cache.data) {
+        ngx_free(alcf->cache.data);
+    }
+
+    if (alcf->cache_key.data) {
+        ngx_free(alcf->cache_key.data);
+    }
+
+    alcf->cache.data = p;
+    alcf->cache.len = jwks->len;
+    alcf->cache_key.data = k;
+    alcf->cache_key.len = key->len;
+    alcf->cache_expire = ngx_time() + alcf->key_cache;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_auth_jwt_key_cache_get(ngx_http_auth_jwt_loc_conf_t *alcf,
+    ngx_str_t *key, ngx_str_t *jwks)
+{
+    if (alcf->key_cache == 0 || alcf->cache.len == 0
+        || alcf->cache_expire <= ngx_time()
+        || alcf->cache_key.len != key->len
+        || ngx_strncmp(alcf->cache_key.data, key->data, key->len) != 0)
+    {
+        return NGX_DECLINED;
+    }
+
+    *jwks = alcf->cache;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_auth_jwt_key_request(ngx_http_request_t *r,
+    ngx_http_auth_jwt_loc_conf_t *alcf, ngx_http_auth_jwt_ctx_t *ctx)
+{
+    ngx_str_t                    uri;
+    ngx_http_request_t          *sr;
+    ngx_http_post_subrequest_t  *ps;
+
+    if (ngx_http_complex_value(r, alcf->key_request, &uri) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    if (uri.len == 0 || uri.data[0] != '/') {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "invalid auth_jwt_key_request URI \"%V\"", &uri);
+        return NGX_ERROR;
+    }
+
+    if (ngx_http_auth_jwt_key_cache_get(alcf, &uri, &ctx->request_jwks)
+        == NGX_OK)
+    {
+        return NGX_OK;
+    }
+
+    ps = ngx_palloc(r->pool, sizeof(ngx_http_post_subrequest_t));
+    if (ps == NULL) {
+        return NGX_ERROR;
+    }
+
+    ps->handler = ngx_http_auth_jwt_key_request_done;
+    ps->data = ctx;
+
+    if (ngx_http_subrequest(r, &uri, NULL, &sr, ps,
+                            NGX_HTTP_SUBREQUEST_IN_MEMORY
+                            |NGX_HTTP_SUBREQUEST_WAITED)
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    sr->header_only = 0;
+    ctx->subrequest = sr;
+
+    return NGX_AGAIN;
+}
+
+
+static ngx_int_t
+ngx_http_auth_jwt_key_request_done(ngx_http_request_t *r, void *data,
+    ngx_int_t rc)
+{
+    ngx_http_auth_jwt_ctx_t  *ctx = data;
+
+    ctx->done = 1;
+    ctx->status = r->headers_out.status;
+
+    return rc;
+}
+
+
+static ngx_int_t
 ngx_http_auth_jwt_verify(ngx_http_request_t *r,
-    ngx_http_auth_jwt_loc_conf_t *alcf, ngx_str_t *alg, ngx_str_t *kid,
-    ngx_str_t *signed_data, ngx_str_t *signature)
+    ngx_http_auth_jwt_loc_conf_t *alcf, ngx_http_auth_jwt_ctx_t *ctx,
+    ngx_str_t *alg, ngx_str_t *kid, ngx_str_t *signed_data,
+    ngx_str_t *signature)
 {
     time_t                   now;
     ngx_int_t                rc;
@@ -818,23 +1179,53 @@ ngx_http_auth_jwt_verify(ngx_http_request_t *r,
         return NGX_DECLINED;
     }
 
-    if (alcf->key_request && alcf->key_file == NULL) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                      "auth_jwt_key_request is not available locally");
+    if (alcf->key_file) {
+        if (ngx_http_complex_value(r, alcf->key_file, &name) != NGX_OK) {
+            return NGX_ERROR;
+        }
+
+        if (alcf->key_file->lengths == NULL
+            && ngx_http_auth_jwt_key_cache_get(alcf, &name, &jwks) == NGX_OK)
+        {
+            goto loaded;
+        }
+
+        if (ngx_http_auth_jwt_read_file(r, &name, &jwks) != NGX_OK) {
+            return NGX_ERROR;
+        }
+
+        if (alcf->key_file->lengths == NULL
+            && ngx_http_auth_jwt_key_cache_save(r, alcf, &name, &jwks)
+               != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
+    } else if (alcf->key_request) {
+        if (ctx->request_jwks.len == 0) {
+            rc = ngx_http_auth_jwt_key_request(r, alcf, ctx);
+            if (rc != NGX_OK) {
+                return rc;
+            }
+        }
+
+        jwks = ctx->request_jwks;
+
+        if (alcf->key_cache && alcf->key_request->lengths == NULL
+            && ngx_http_complex_value(r, alcf->key_request, &name) == NGX_OK
+            && ngx_http_auth_jwt_key_cache_get(alcf, &name, &jwks)
+               != NGX_OK
+            && ngx_http_auth_jwt_key_cache_save(r, alcf, &name, &jwks)
+               != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
+    } else {
         return NGX_ERROR;
     }
 
-    if (alcf->key_file == NULL) {
-        return NGX_ERROR;
-    }
-
-    if (ngx_http_complex_value(r, alcf->key_file, &name) != NGX_OK) {
-        return NGX_ERROR;
-    }
-
-    if (ngx_http_auth_jwt_read_file(r, &name, &jwks) != NGX_OK) {
-        return NGX_ERROR;
-    }
+loaded:
 
     for (pos = 0; pos < jwks.len; pos++) {
         if (jwks.data[pos] == '[') {
@@ -1060,7 +1451,15 @@ ngx_http_auth_jwt_json_value(ngx_pool_t *pool, u_char **pp, u_char *last,
             if (depth == 0) {
                 break;
             }
+
             depth--;
+            p++;
+
+            if (depth == 0) {
+                break;
+            }
+
+            continue;
         }
 
         if (depth == 0 && (*p == ',' || *p == '}' || *p == ']')) {
@@ -1238,6 +1637,139 @@ ngx_http_auth_jwt_array_value(ngx_array_t *a, ngx_str_t *name,
 
 
 static ngx_int_t
+ngx_http_auth_jwt_json_array(ngx_pool_t *pool, ngx_str_t *json,
+    ngx_str_t *value)
+{
+    u_char     *p, *last, *dst;
+    size_t      len;
+    ngx_int_t   rc;
+    ngx_str_t   v, *elt;
+    ngx_array_t *elts;
+    ngx_uint_t  i;
+
+    p = json->data;
+    last = json->data + json->len;
+
+    ngx_http_auth_jwt_json_skip_ws(&p, last);
+
+    if (p == last || *p++ != '[') {
+        return NGX_DECLINED;
+    }
+
+    elts = ngx_array_create(pool, 2, sizeof(ngx_str_t));
+    if (elts == NULL) {
+        return NGX_ERROR;
+    }
+
+    len = 0;
+
+    for ( ;; ) {
+        ngx_http_auth_jwt_json_skip_ws(&p, last);
+
+        if (p < last && *p == ']') {
+            break;
+        }
+
+        rc = ngx_http_auth_jwt_json_value(pool, &p, last, &v);
+        if (rc != NGX_OK) {
+            return rc;
+        }
+
+        elt = ngx_array_push(elts);
+        if (elt == NULL) {
+            return NGX_ERROR;
+        }
+
+        *elt = v;
+        len += v.len;
+
+        ngx_http_auth_jwt_json_skip_ws(&p, last);
+
+        if (p < last && *p == ',') {
+            p++;
+            continue;
+        }
+
+        if (p < last && *p == ']') {
+            break;
+        }
+
+        return NGX_DECLINED;
+    }
+
+    if (elts->nelts == 0) {
+        ngx_str_null(value);
+        return NGX_OK;
+    }
+
+    len += elts->nelts - 1;
+
+    value->data = ngx_pnalloc(pool, len);
+    if (value->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    dst = value->data;
+    v = ((ngx_str_t *) elts->elts)[0];
+
+    for (i = 0; i < elts->nelts; i++) {
+        v = ((ngx_str_t *) elts->elts)[i];
+
+        if (i != 0) {
+            *dst++ = ',';
+        }
+
+        dst = ngx_cpymem(dst, v.data, v.len);
+    }
+
+    value->len = dst - value->data;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_auth_jwt_json_normalize(ngx_pool_t *pool, ngx_str_t *json,
+    ngx_str_t *value)
+{
+    u_char  *p, *last;
+
+    p = json->data;
+    last = json->data + json->len;
+
+    ngx_http_auth_jwt_json_skip_ws(&p, last);
+
+    if (p < last && *p == '[') {
+        return ngx_http_auth_jwt_json_array(pool, json, value);
+    }
+
+    *value = *json;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_auth_jwt_json_lookup(ngx_pool_t *pool, ngx_str_t *json,
+    ngx_array_t *names, ngx_str_t *value)
+{
+    ngx_str_t   v, *name;
+    ngx_uint_t  i;
+
+    v = *json;
+    name = names->elts;
+
+    for (i = 0; i < names->nelts; i++) {
+        if (ngx_http_auth_jwt_json_get(pool, &v, &name[i], &v) != NGX_OK) {
+            return NGX_DECLINED;
+        }
+    }
+
+    return ngx_http_auth_jwt_json_normalize(pool, &v, value);
+}
+
+
+static ngx_int_t
 ngx_http_auth_jwt_value(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     ngx_str_t *value)
 {
@@ -1289,6 +1821,12 @@ ngx_http_auth_jwt_variable(ngx_http_request_t *r,
         if (ngx_http_auth_jwt_array_value(ctx->payload, &key, &value)
             == NGX_OK)
         {
+            if (ngx_http_auth_jwt_json_normalize(r->pool, &value, &value)
+                != NGX_OK)
+            {
+                return ngx_http_auth_jwt_not_found(v);
+            }
+
             return ngx_http_auth_jwt_value(r, v, &value);
         }
     }
@@ -1304,6 +1842,12 @@ ngx_http_auth_jwt_variable(ngx_http_request_t *r,
         if (ngx_http_auth_jwt_array_value(ctx->header, &key, &value)
             == NGX_OK)
         {
+            if (ngx_http_auth_jwt_json_normalize(r->pool, &value, &value)
+                != NGX_OK)
+            {
+                return ngx_http_auth_jwt_not_found(v);
+            }
+
             return ngx_http_auth_jwt_value(r, v, &value);
         }
     }
@@ -1344,14 +1888,16 @@ ngx_http_auth_jwt_conf_variable(ngx_http_request_t *r,
     }
 
     if (var->type == NGX_HTTP_AUTH_JWT_CLAIM) {
-        if (ngx_http_auth_jwt_array_value(ctx->payload, &var->key, &value)
+        if (ngx_http_auth_jwt_json_lookup(r->pool, &ctx->payload_json,
+                                          var->keys, &value)
             == NGX_OK)
         {
             return ngx_http_auth_jwt_value(r, v, &value);
         }
 
     } else {
-        if (ngx_http_auth_jwt_array_value(ctx->header, &var->key, &value)
+        if (ngx_http_auth_jwt_json_lookup(r->pool, &ctx->header_json,
+                                          var->keys, &value)
             == NGX_OK)
         {
             return ngx_http_auth_jwt_value(r, v, &value);
@@ -1491,6 +2037,8 @@ ngx_http_auth_jwt_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_http_auth_jwt_loc_conf_t *alcf = conf;
 
     ngx_str_t                 *value, name;
+    ngx_uint_t                 i;
+    ngx_str_t                 *key;
     ngx_http_variable_t       *v;
     ngx_http_auth_jwt_var_t   *var;
 
@@ -1519,8 +2067,21 @@ ngx_http_auth_jwt_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     name.len = value[1].len - 1;
 
     var->name = name;
-    var->key = value[2];
     var->type = (ngx_uint_t) (uintptr_t) cmd->post;
+    var->keys = ngx_array_create(cf->pool, cf->args->nelts - 2,
+                                 sizeof(ngx_str_t));
+    if (var->keys == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    for (i = 2; i < cf->args->nelts; i++) {
+        key = ngx_array_push(var->keys);
+        if (key == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        *key = value[i];
+    }
 
     v = ngx_http_add_variable(cf, &name,
                               NGX_HTTP_VAR_CHANGEABLE|NGX_HTTP_VAR_NOCACHEABLE);
@@ -1545,9 +2106,11 @@ ngx_http_auth_jwt_require(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_http_auth_jwt_loc_conf_t *alcf = conf;
 
     ngx_str_t                    *value;
+    ngx_uint_t                    i, code;
     ngx_http_auth_jwt_require_t  *req;
 
     value = cf->args->elts;
+    code = NGX_HTTP_UNAUTHORIZED;
 
     if (alcf->requires == NGX_CONF_UNSET_PTR) {
         alcf->requires = ngx_array_create(cf->pool, 2,
@@ -1557,21 +2120,53 @@ ngx_http_auth_jwt_require(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
     }
 
-    req = ngx_array_push(alcf->requires);
-    if (req == NULL) {
-        return NGX_CONF_ERROR;
+    for (i = 1; i < cf->args->nelts; i++) {
+        if (value[i].len == sizeof("error=401") - 1
+            && ngx_strncmp(value[i].data, "error=401",
+                           sizeof("error=401") - 1)
+               == 0)
+        {
+            code = NGX_HTTP_UNAUTHORIZED;
+            continue;
+        }
+
+        if (value[i].len == sizeof("error=403") - 1
+            && ngx_strncmp(value[i].data, "error=403",
+                           sizeof("error=403") - 1)
+               == 0)
+        {
+            code = NGX_HTTP_FORBIDDEN;
+            continue;
+        }
+
+        if (value[i].len >= sizeof("error=") - 1
+            && ngx_strncmp(value[i].data, "error=", sizeof("error=") - 1)
+               == 0)
+        {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "invalid auth_jwt_require parameter \"%V\"",
+                               &value[i]);
+            return NGX_CONF_ERROR;
+        }
     }
 
-    ngx_memzero(req, sizeof(ngx_http_auth_jwt_require_t));
+    for (i = 1; i < cf->args->nelts; i++) {
+        if (value[i].len >= sizeof("error=") - 1
+            && ngx_strncmp(value[i].data, "error=", sizeof("error=") - 1)
+               == 0)
+        {
+            continue;
+        }
 
-    if (ngx_http_auth_jwt_compile(cf, &value[1], &req->left) != NGX_OK) {
-        return NGX_CONF_ERROR;
-    }
+        req = ngx_array_push(alcf->requires);
+        if (req == NULL) {
+            return NGX_CONF_ERROR;
+        }
 
-    if (cf->args->nelts == 3) {
-        req->has_right = 1;
+        ngx_memzero(req, sizeof(ngx_http_auth_jwt_require_t));
+        req->code = code;
 
-        if (ngx_http_auth_jwt_compile(cf, &value[2], &req->right) != NGX_OK) {
+        if (ngx_http_auth_jwt_compile(cf, &value[i], &req->left) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
     }
