@@ -180,6 +180,10 @@ struct ngx_http_file_cache_s {
     ngx_msec_t                       manager_sleep;
     ngx_msec_t                       manager_threshold;
 
+    ngx_uint_t                       purger_files;
+    ngx_msec_t                       purger_sleep;
+    ngx_msec_t                       purger_threshold;
+
     ngx_shm_zone_t                  *shm_zone;
 
     ngx_uint_t                       use_temp_path;
@@ -194,6 +198,7 @@ ngx_int_t ngx_http_file_cache_open(ngx_http_request_t *r);
 ngx_int_t ngx_http_file_cache_set_header(ngx_http_request_t *r, u_char *buf);
 void ngx_http_file_cache_update(ngx_http_request_t *r, ngx_temp_file_t *tf);
 void ngx_http_file_cache_update_header(ngx_http_request_t *r);
+ngx_int_t ngx_http_file_cache_purge(ngx_http_request_t *r);
 ngx_int_t ngx_http_cache_send(ngx_http_request_t *);
 void ngx_http_file_cache_free(ngx_http_cache_t *c, ngx_temp_file_t *tf);
 time_t ngx_http_file_cache_valid(ngx_array_t *cache_valid, ngx_uint_t status);

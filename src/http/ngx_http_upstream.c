@@ -855,6 +855,7 @@ static ngx_int_t
 ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 {
     ngx_int_t               rc;
+    ngx_uint_t              purge;
     ngx_http_cache_t       *c;
     ngx_http_file_cache_t  *cache;
 
@@ -862,7 +863,22 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
     if (c == NULL) {
 
-        if (!(r->method & u->conf->cache_methods)) {
+        purge = 0;
+
+        switch (ngx_http_test_predicates(r, u->conf->cache_purge)) {
+
+        case NGX_ERROR:
+            return NGX_ERROR;
+
+        case NGX_DECLINED:
+            purge = 1;
+            break;
+
+        default: /* NGX_OK */
+            break;
+        }
+
+        if (!purge && !(r->method & u->conf->cache_methods)) {
             return NGX_DECLINED;
         }
 
@@ -880,6 +896,8 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
             return NGX_ERROR;
         }
 
+        r->cache->file_cache = cache;
+
         if (u->create_key(r) != NGX_OK) {
             return NGX_ERROR;
         }
@@ -887,6 +905,17 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
         /* TODO: add keys */
 
         ngx_http_file_cache_create_key(r);
+
+        if (purge) {
+            rc = ngx_http_file_cache_purge(r);
+
+            if (rc == NGX_ERROR) {
+                return NGX_ERROR;
+            }
+
+            return (rc == NGX_OK) ? NGX_HTTP_NO_CONTENT
+                                  : NGX_HTTP_NOT_FOUND;
+        }
 
         if (r->cache->header_start + 256 > u->conf->buffer_size) {
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
@@ -905,7 +934,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
         c->body_start = u->conf->buffer_size;
         c->min_uses = u->conf->cache_min_uses;
-        c->file_cache = cache;
 
         switch (ngx_http_test_predicates(r, u->conf->cache_bypass)) {
 

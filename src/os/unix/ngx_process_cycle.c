@@ -361,7 +361,7 @@ ngx_start_cache_manager_processes(ngx_cycle_t *cycle, ngx_uint_t respawn)
     path = ngx_cycle->paths.elts;
     for (i = 0; i < ngx_cycle->paths.nelts; i++) {
 
-        if (path[i]->manager) {
+        if (path[i]->manager || path[i]->purger) {
             manager = 1;
         }
 
@@ -1150,6 +1150,14 @@ ngx_cache_manager_process_handler(ngx_event_t *ev)
 
         if (path[i]->manager) {
             n = path[i]->manager(path[i]->data);
+
+            next = (n <= next) ? n : next;
+
+            ngx_time_update();
+        }
+
+        if (path[i]->purger) {
+            n = path[i]->purger(path[i]->data);
 
             next = (n <= next) ? n : next;
 
