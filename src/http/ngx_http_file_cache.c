@@ -126,6 +126,9 @@ ngx_str_t  ngx_http_cache_status[] = {
 };
 
 
+ngx_array_t *ngx_http_file_caches;
+
+
 static u_char  ngx_http_file_cache_key[] = { LF, 'K', 'E', 'Y', ':', ' ' };
 
 
@@ -200,6 +203,7 @@ ngx_http_file_cache_init(ngx_shm_zone_t *shm_zone, void *data)
     cache->sh->size = 0;
     cache->sh->count = 0;
     cache->sh->watermark = (ngx_uint_t) -1;
+    ngx_memzero(&cache->sh->stats, sizeof(ngx_http_file_cache_stats_t));
 
     cache->bsize = ngx_fs_bsize(cache->path->name.data);
 
@@ -4404,6 +4408,21 @@ ngx_http_file_cache_set_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     cache->shm_zone->init = ngx_http_file_cache_init;
     cache->shm_zone->data = cache;
+
+    if (ngx_http_file_caches == NULL) {
+        ngx_http_file_caches = ngx_array_create(cf->pool, 4,
+                                                sizeof(ngx_http_file_cache_t *));
+        if (ngx_http_file_caches == NULL) {
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    ce = ngx_array_push(ngx_http_file_caches);
+    if (ce == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    *ce = cache;
 
     cache->use_temp_path = use_temp_path;
 

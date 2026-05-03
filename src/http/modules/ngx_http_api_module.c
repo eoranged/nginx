@@ -212,6 +212,11 @@ ngx_http_api_process(ngx_http_request_t *r)
         return ngx_http_api_slabs(r);
     }
 
+    rc = ngx_http_api_caches(r);
+    if (rc != NGX_DECLINED) {
+        return rc;
+    }
+
     rc = ngx_http_api_upstreams(r);
     if (rc != NGX_DECLINED) {
         return rc;
@@ -253,6 +258,16 @@ ngx_http_api_send_status(ngx_http_request_t *r, ngx_buf_t *b,
     }
 
     return ngx_http_output_filter(r, &out);
+}
+
+
+ngx_int_t
+ngx_http_api_send_no_content(ngx_http_request_t *r)
+{
+    r->headers_out.status = NGX_HTTP_NO_CONTENT;
+    r->headers_out.content_length_n = 0;
+
+    return ngx_http_send_header(r);
 }
 
 
@@ -557,6 +572,8 @@ ngx_http_api_log_handler(ngx_http_request_t *r)
         ngx_http_api_processing_done(rctx->processing);
     }
 
+    ngx_http_api_cache_log(r);
+
     alcf = ngx_http_get_module_loc_conf(r, ngx_http_api_module);
 
     if (alcf->status_zone == NULL) {
@@ -740,6 +757,10 @@ ngx_http_api_create_main_conf(ngx_conf_t *cf)
     if (conf == NULL) {
         return NULL;
     }
+
+#if (NGX_HTTP_CACHE)
+    ngx_http_file_caches = NULL;
+#endif
 
     return conf;
 }

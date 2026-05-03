@@ -23,6 +23,8 @@
 #define NGX_HTTP_CACHE_HIT           7
 #define NGX_HTTP_CACHE_SCARCE        8
 
+#define NGX_HTTP_CACHE_STATUS_COUNT  7
+
 #define NGX_HTTP_CACHE_KEY_LEN       16
 #define NGX_HTTP_CACHE_ETAG_LEN      128
 #define NGX_HTTP_CACHE_VARY_LEN      128
@@ -145,6 +147,11 @@ typedef struct {
 
 
 typedef struct {
+    ngx_atomic_t                     responses[NGX_HTTP_CACHE_STATUS_COUNT];
+} ngx_http_file_cache_stats_t;
+
+
+typedef struct {
     ngx_rbtree_t                     rbtree;
     ngx_rbtree_node_t                sentinel;
     ngx_queue_t                      queue;
@@ -153,6 +160,7 @@ typedef struct {
     off_t                            size;
     ngx_uint_t                       count;
     ngx_uint_t                       watermark;
+    ngx_http_file_cache_stats_t      stats;
 } ngx_http_file_cache_sh_t;
 
 
@@ -210,6 +218,7 @@ char *ngx_http_file_cache_valid_set_slot(ngx_conf_t *cf, ngx_command_t *cmd,
 
 
 extern ngx_str_t  ngx_http_cache_status[];
+extern ngx_array_t *ngx_http_file_caches;
 
 
 #endif /* _NGX_HTTP_CACHE_H_INCLUDED_ */
