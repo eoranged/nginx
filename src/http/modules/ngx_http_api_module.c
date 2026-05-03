@@ -8,6 +8,8 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#include "ngx_http_api_module.h"
+
 
 #define NGX_HTTP_API_ZONE_SIZE  (8 * ngx_pagesize)
 
@@ -38,6 +40,7 @@ typedef struct {
 
 typedef struct {
     ngx_shm_zone_t               *status_zone;
+    ngx_flag_t                    write;
 } ngx_http_api_loc_conf_t;
 
 
@@ -55,8 +58,8 @@ typedef struct {
 
 
 static ngx_int_t ngx_http_api_handler(ngx_http_request_t *r);
-static ngx_int_t ngx_http_api_send(ngx_http_request_t *r, ngx_buf_t *b);
-static ngx_buf_t *ngx_http_api_create_buffer(ngx_http_request_t *r);
+static ngx_int_t ngx_http_api_process(ngx_http_request_t *r);
+static void ngx_http_api_body_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_api_nginx(ngx_http_request_t *r);
 static ngx_int_t ngx_http_api_server_zones(ngx_http_request_t *r);
 static ngx_int_t ngx_http_api_slabs(ngx_http_request_t *r);
@@ -65,7 +68,6 @@ static ngx_int_t ngx_http_api_log_handler(ngx_http_request_t *r);
 static void ngx_http_api_processing_clear(ngx_http_request_t *r);
 static void ngx_http_api_processing_done(ngx_http_api_processing_t *processing);
 static void ngx_http_api_processing_cleanup(void *data);
-static ngx_int_t ngx_http_api_valid_name(ngx_str_t *name);
 static ngx_int_t ngx_http_api_validate_shared_memory(ngx_conf_t *cf);
 static ngx_int_t ngx_http_api_init_zone(ngx_shm_zone_t *shm_zone, void *data);
 static void *ngx_http_api_create_main_conf(ngx_conf_t *cf);
@@ -83,7 +85,7 @@ static ngx_command_t  ngx_http_api_commands[] = {
     { ngx_string("api"),
       NGX_HTTP_LOC_CONF|NGX_CONF_NOARGS|NGX_CONF_TAKE1,
       ngx_http_api_set,
-      0,
+      NGX_HTTP_LOC_CONF_OFFSET,
       0,
       NULL },
 
@@ -132,16 +134,62 @@ ngx_module_t  ngx_http_api_module = {
 static ngx_int_t
 ngx_http_api_handler(ngx_http_request_t *r)
 {
-    ngx_int_t  rc;
+    ngx_int_t                 rc;
+    ngx_http_api_loc_conf_t  *alcf;
 
-    if (!(r->method & (NGX_HTTP_GET|NGX_HTTP_HEAD))) {
+    if (r->method & (NGX_HTTP_GET|NGX_HTTP_HEAD)) {
+        rc = ngx_http_discard_request_body(r);
+        if (rc != NGX_OK) {
+            return rc;
+        }
+
+        return ngx_http_api_process(r);
+    }
+
+    if (!(r->method & (NGX_HTTP_POST|NGX_HTTP_PATCH|NGX_HTTP_DELETE))) {
         return NGX_HTTP_NOT_ALLOWED;
     }
 
-    rc = ngx_http_discard_request_body(r);
-    if (rc != NGX_OK) {
+    alcf = ngx_http_get_module_loc_conf(r, ngx_http_api_module);
+
+    if (!alcf->write) {
+        return NGX_HTTP_NOT_ALLOWED;
+    }
+
+    if (r->method == NGX_HTTP_DELETE) {
+        rc = ngx_http_discard_request_body(r);
+        if (rc != NGX_OK) {
+            return rc;
+        }
+
+        return ngx_http_api_process(r);
+    }
+
+    rc = ngx_http_read_client_request_body(r, ngx_http_api_body_handler);
+
+    if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
         return rc;
     }
+
+    return NGX_DONE;
+}
+
+
+static void
+ngx_http_api_body_handler(ngx_http_request_t *r)
+{
+    ngx_int_t  rc;
+
+    rc = ngx_http_api_process(r);
+
+    ngx_http_finalize_request(r, rc);
+}
+
+
+static ngx_int_t
+ngx_http_api_process(ngx_http_request_t *r)
+{
+    ngx_int_t  rc;
 
     if (r->uri.len == sizeof("/api/9/nginx") - 1
         && ngx_strncmp(r->uri.data, "/api/9/nginx",
@@ -164,17 +212,30 @@ ngx_http_api_handler(ngx_http_request_t *r)
         return ngx_http_api_slabs(r);
     }
 
+    rc = ngx_http_api_upstreams(r);
+    if (rc != NGX_DECLINED) {
+        return rc;
+    }
+
     return NGX_HTTP_NOT_FOUND;
 }
 
 
-static ngx_int_t
+ngx_int_t
 ngx_http_api_send(ngx_http_request_t *r, ngx_buf_t *b)
+{
+    return ngx_http_api_send_status(r, b, NGX_HTTP_OK);
+}
+
+
+ngx_int_t
+ngx_http_api_send_status(ngx_http_request_t *r, ngx_buf_t *b,
+    ngx_uint_t status)
 {
     ngx_int_t    rc;
     ngx_chain_t  out;
 
-    r->headers_out.status = NGX_HTTP_OK;
+    r->headers_out.status = status;
     r->headers_out.content_length_n = b->last - b->pos;
     r->headers_out.content_type_len = sizeof("application/json") - 1;
     ngx_str_set(&r->headers_out.content_type, "application/json");
@@ -195,7 +256,7 @@ ngx_http_api_send(ngx_http_request_t *r, ngx_buf_t *b)
 }
 
 
-static ngx_buf_t *
+ngx_buf_t *
 ngx_http_api_create_buffer(ngx_http_request_t *r)
 {
     size_t                   size;
@@ -228,6 +289,52 @@ ngx_http_api_create_buffer(ngx_http_request_t *r)
     }
 
     return ngx_create_temp_buf(r->pool, size);
+}
+
+
+ngx_int_t
+ngx_http_api_read_body(ngx_http_request_t *r, ngx_str_t *body)
+{
+    u_char                    *p;
+    size_t                     len;
+    ngx_chain_t               *cl;
+    ngx_http_request_body_t   *rb;
+
+    body->len = 0;
+    body->data = NULL;
+
+    rb = r->request_body;
+    if (rb == NULL || rb->bufs == NULL) {
+        return NGX_OK;
+    }
+
+    if (rb->temp_file) {
+        return NGX_ERROR;
+    }
+
+    len = 0;
+
+    for (cl = rb->bufs; cl; cl = cl->next) {
+        len += cl->buf->last - cl->buf->pos;
+    }
+
+    if (len == 0) {
+        return NGX_OK;
+    }
+
+    body->data = ngx_pnalloc(r->pool, len);
+    if (body->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    body->len = len;
+    p = body->data;
+
+    for (cl = rb->bufs; cl; cl = cl->next) {
+        p = ngx_cpymem(p, cl->buf->pos, cl->buf->last - cl->buf->pos);
+    }
+
+    return NGX_OK;
 }
 
 
@@ -528,7 +635,7 @@ ngx_http_api_processing_cleanup(void *data)
 }
 
 
-static ngx_int_t
+ngx_int_t
 ngx_http_api_valid_name(ngx_str_t *name)
 {
     size_t  i;
@@ -649,6 +756,7 @@ ngx_http_api_create_loc_conf(ngx_conf_t *cf)
     }
 
     conf->status_zone = NGX_CONF_UNSET_PTR;
+    conf->write = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -661,6 +769,7 @@ ngx_http_api_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_api_loc_conf_t *conf = child;
 
     ngx_conf_merge_ptr_value(conf->status_zone, prev->status_zone, NULL);
+    ngx_conf_merge_value(conf->write, prev->write, 0);
 
     return NGX_CONF_OK;
 }
@@ -669,11 +778,30 @@ ngx_http_api_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 static char *
 ngx_http_api_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
+    ngx_http_api_loc_conf_t   *alcf = conf;
+
+    ngx_str_t                 *value;
     ngx_http_core_loc_conf_t  *clcf;
     ngx_http_api_main_conf_t  *amcf;
 
     amcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_api_module);
     amcf->api = 1;
+
+    value = cf->args->elts;
+
+    if (cf->args->nelts == 2) {
+        if (ngx_strcmp(value[1].data, "write=on") == 0) {
+            alcf->write = 1;
+
+        } else if (ngx_strcmp(value[1].data, "write=off") == 0) {
+            alcf->write = 0;
+
+        } else {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "invalid parameter \"%V\"", &value[1]);
+            return NGX_CONF_ERROR;
+        }
+    }
 
     clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
     clcf->handler = ngx_http_api_handler;
@@ -768,6 +896,12 @@ ngx_http_api_init(ngx_conf_t *cf)
 
     if (amcf->api
         && ngx_http_api_validate_shared_memory(cf) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    if (amcf->api
+        && ngx_http_api_validate_upstream_names(cf) != NGX_OK)
     {
         return NGX_ERROR;
     }
