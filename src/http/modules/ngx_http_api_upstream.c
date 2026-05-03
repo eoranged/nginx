@@ -89,6 +89,10 @@ static u_char *ngx_http_api_http_write_peer(u_char *p,
     ngx_http_upstream_rr_peer_t *peer, ngx_uint_t id, ngx_uint_t backup);
 static ngx_int_t ngx_http_api_http_write_servers(ngx_http_request_t *r,
     ngx_http_upstream_srv_conf_t *uscf);
+static u_char *ngx_http_api_http_prometheus_peer(u_char *p,
+    ngx_str_t *upstream, ngx_http_upstream_rr_peer_t *peer);
+static ngx_uint_t ngx_http_api_http_peer_state(
+    ngx_http_upstream_rr_peer_t *peer);
 static ngx_int_t ngx_http_api_http_move_peer(
     ngx_http_upstream_rr_peers_t *peers, ngx_http_upstream_rr_peers_t *src,
     ngx_http_upstream_rr_peer_t *peer, ngx_uint_t backup);
@@ -138,6 +142,10 @@ static u_char *ngx_http_api_stream_write_peer(u_char *p,
     ngx_stream_upstream_rr_peer_t *peer, ngx_uint_t id, ngx_uint_t backup);
 static ngx_int_t ngx_http_api_stream_write_servers(ngx_http_request_t *r,
     ngx_stream_upstream_srv_conf_t *uscf);
+static u_char *ngx_http_api_stream_prometheus_peer(u_char *p,
+    ngx_str_t *upstream, ngx_stream_upstream_rr_peer_t *peer);
+static ngx_uint_t ngx_http_api_stream_peer_state(
+    ngx_stream_upstream_rr_peer_t *peer);
 static ngx_int_t ngx_http_api_stream_move_peer(
     ngx_stream_upstream_rr_peers_t *peers, ngx_stream_upstream_rr_peers_t *src,
     ngx_stream_upstream_rr_peer_t *peer, ngx_uint_t backup);
@@ -159,6 +167,7 @@ static ngx_int_t ngx_http_api_error(ngx_http_request_t *r, ngx_uint_t status,
     const char *text);
 static ngx_buf_t *ngx_http_api_upstream_buffer(ngx_http_request_t *r,
     ngx_uint_t peers);
+static ngx_int_t ngx_http_api_valid_label(ngx_str_t *name);
 static u_char *ngx_http_api_time(u_char *p, ngx_msec_t msec);
 
 
@@ -187,28 +196,202 @@ ngx_http_api_upstreams(ngx_http_request_t *r)
 }
 
 
+u_char *
+ngx_http_api_prometheus_upstreams(u_char *p)
+{
+    ngx_uint_t                       i;
+    ngx_http_upstream_rr_peer_t     *peer;
+    ngx_http_upstream_rr_peers_t    *peers;
+    ngx_http_upstream_srv_conf_t   **uscfp;
+    ngx_http_upstream_main_conf_t   *umcf;
+
+    umcf = ngx_http_cycle_get_module_main_conf(((ngx_cycle_t *) ngx_cycle),
+                                               ngx_http_upstream_module);
+    if (umcf) {
+        uscfp = umcf->upstreams.elts;
+
+        for (i = 0; i < umcf->upstreams.nelts; i++) {
+            if (uscfp[i]->shm_zone == NULL || uscfp[i]->peer.data == NULL) {
+                continue;
+            }
+
+            peers = uscfp[i]->peer.data;
+            ngx_http_api_http_peers_rlock(peers);
+
+            for (peer = peers->peer; peer; peer = peer->next) {
+                p = ngx_http_api_http_prometheus_peer(p, &uscfp[i]->host,
+                                                      peer);
+            }
+
+            if (peers->next) {
+                for (peer = peers->next->peer; peer; peer = peer->next) {
+                    p = ngx_http_api_http_prometheus_peer(p, &uscfp[i]->host,
+                                                          peer);
+                }
+            }
+
+            ngx_http_api_http_peers_unlock(peers);
+        }
+    }
+
+#if (NGX_STREAM_UPSTREAM_ZONE)
+    {
+        ngx_stream_upstream_rr_peer_t     *speer;
+        ngx_stream_upstream_rr_peers_t    *speers;
+        ngx_stream_upstream_srv_conf_t   **suscfp;
+        ngx_stream_upstream_main_conf_t   *sumcf;
+
+        sumcf = ngx_stream_cycle_get_module_main_conf(
+                                            ((ngx_cycle_t *) ngx_cycle),
+                                            ngx_stream_upstream_module);
+        if (sumcf) {
+            suscfp = sumcf->upstreams.elts;
+
+            for (i = 0; i < sumcf->upstreams.nelts; i++) {
+                if (suscfp[i]->shm_zone == NULL
+                    || suscfp[i]->peer.data == NULL)
+                {
+                    continue;
+                }
+
+                speers = suscfp[i]->peer.data;
+                ngx_http_api_stream_peers_rlock(speers);
+
+                for (speer = speers->peer; speer; speer = speer->next) {
+                    p = ngx_http_api_stream_prometheus_peer(p,
+                                                           &suscfp[i]->host,
+                                                           speer);
+                }
+
+                if (speers->next) {
+                    for (speer = speers->next->peer; speer;
+                         speer = speer->next)
+                    {
+                        p = ngx_http_api_stream_prometheus_peer(p,
+                                                               &suscfp[i]->host,
+                                                               speer);
+                    }
+                }
+
+                ngx_http_api_stream_peers_unlock(speers);
+            }
+        }
+    }
+#endif
+
+    return p;
+}
+
+
 ngx_int_t
 ngx_http_api_validate_upstream_names(ngx_conf_t *cf)
 {
     ngx_uint_t                       i;
+    ngx_str_t                       *server;
+    ngx_http_upstream_rr_peer_t     *peer;
+    ngx_http_upstream_rr_peers_t    *peers;
     ngx_http_upstream_srv_conf_t   **uscfp;
     ngx_http_upstream_main_conf_t   *umcf;
 
     umcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_upstream_module);
-    if (umcf == NULL) {
-        return NGX_OK;
-    }
+    if (umcf) {
+        uscfp = umcf->upstreams.elts;
 
-    uscfp = umcf->upstreams.elts;
+        for (i = 0; i < umcf->upstreams.nelts; i++) {
+            if (ngx_http_api_valid_name(&uscfp[i]->host) != NGX_OK) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "invalid upstream name \"%V\"",
+                                   &uscfp[i]->host);
+                return NGX_ERROR;
+            }
 
-    for (i = 0; i < umcf->upstreams.nelts; i++) {
-        if (ngx_http_api_valid_name(&uscfp[i]->host) != NGX_OK) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "invalid upstream name \"%V\"",
-                               &uscfp[i]->host);
-            return NGX_ERROR;
+            peers = uscfp[i]->peer.data;
+            if (peers == NULL) {
+                continue;
+            }
+
+            for (peer = peers->peer; peer; peer = peer->next) {
+                server = peer->server.len ? &peer->server : &peer->name;
+
+                if (ngx_http_api_valid_label(server) != NGX_OK) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                       "invalid upstream server name \"%V\"",
+                                       server);
+                    return NGX_ERROR;
+                }
+            }
+
+            if (peers->next) {
+                for (peer = peers->next->peer; peer; peer = peer->next) {
+                    server = peer->server.len ? &peer->server : &peer->name;
+
+                    if (ngx_http_api_valid_label(server) != NGX_OK) {
+                        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                           "invalid upstream server name "
+                                           "\"%V\"", server);
+                        return NGX_ERROR;
+                    }
+                }
+            }
         }
     }
+
+#if (NGX_STREAM_UPSTREAM_ZONE)
+    {
+        ngx_stream_upstream_rr_peer_t     *speer;
+        ngx_stream_upstream_rr_peers_t    *speers;
+        ngx_stream_upstream_srv_conf_t   **suscfp;
+        ngx_stream_upstream_main_conf_t   *sumcf;
+
+        sumcf = ngx_stream_cycle_get_module_main_conf(cf->cycle,
+                                                ngx_stream_upstream_module);
+        if (sumcf) {
+            suscfp = sumcf->upstreams.elts;
+
+            for (i = 0; i < sumcf->upstreams.nelts; i++) {
+                if (ngx_http_api_valid_name(&suscfp[i]->host) != NGX_OK) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                       "invalid upstream name \"%V\"",
+                                       &suscfp[i]->host);
+                    return NGX_ERROR;
+                }
+
+                speers = suscfp[i]->peer.data;
+                if (speers == NULL) {
+                    continue;
+                }
+
+                for (speer = speers->peer; speer; speer = speer->next) {
+                    server = speer->server.len ? &speer->server
+                                               : &speer->name;
+
+                    if (ngx_http_api_valid_label(server) != NGX_OK) {
+                        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                           "invalid upstream server name "
+                                           "\"%V\"", server);
+                        return NGX_ERROR;
+                    }
+                }
+
+                if (speers->next) {
+                    for (speer = speers->next->peer; speer;
+                         speer = speer->next)
+                    {
+                        server = speer->server.len ? &speer->server
+                                                   : &speer->name;
+
+                        if (ngx_http_api_valid_label(server) != NGX_OK) {
+                            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                               "invalid upstream server name "
+                                               "\"%V\"", server);
+                            return NGX_ERROR;
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
 
     return NGX_OK;
 }
@@ -1058,6 +1241,56 @@ ngx_http_api_http_write_servers(ngx_http_request_t *r,
     ngx_http_api_http_peers_unlock(peers);
 
     return ngx_http_api_send(r, b);
+}
+
+
+static u_char *
+ngx_http_api_http_prometheus_peer(u_char *p, ngx_str_t *upstream,
+    ngx_http_upstream_rr_peer_t *peer)
+{
+    ngx_str_t  *server;
+
+    server = peer->server.len ? &peer->server : &peer->name;
+
+    p = ngx_sprintf(p, "nginxplus_upstream_server_state"
+                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+                    server, upstream, ngx_http_api_http_peer_state(peer));
+    p = ngx_sprintf(p, "nginxplus_upstream_server_active"
+                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+                    server, upstream, peer->conns);
+    p = ngx_sprintf(p, "nginxplus_upstream_server_limit"
+                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+                    server, upstream, peer->max_conns);
+    p = ngx_sprintf(p, "nginxplus_upstream_server_fails"
+                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+                    server, upstream, peer->fails);
+
+    return p;
+}
+
+
+static ngx_uint_t
+ngx_http_api_http_peer_state(ngx_http_upstream_rr_peer_t *peer)
+{
+#if (NGX_HTTP_UPSTREAM_STICKY)
+    if (peer->down & NGX_HTTP_UPSTREAM_DRAINING) {
+        return 2;
+    }
+#endif
+
+    if (peer->down & NGX_HTTP_UPSTREAM_FAILED) {
+        return 3;
+    }
+
+    if (peer->max_fails && peer->fails >= peer->max_fails) {
+        return 4;
+    }
+
+    if (peer->down & NGX_HTTP_UPSTREAM_HC_DOWN) {
+        return 6;
+    }
+
+    return 1;
 }
 
 
@@ -1922,6 +2155,50 @@ ngx_http_api_stream_write_servers(ngx_http_request_t *r,
 }
 
 
+static u_char *
+ngx_http_api_stream_prometheus_peer(u_char *p, ngx_str_t *upstream,
+    ngx_stream_upstream_rr_peer_t *peer)
+{
+    ngx_str_t  *server;
+
+    server = peer->server.len ? &peer->server : &peer->name;
+
+    p = ngx_sprintf(p, "nginxplus_stream_upstream_server_state"
+                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+                    server, upstream, ngx_http_api_stream_peer_state(peer));
+    p = ngx_sprintf(p, "nginxplus_stream_upstream_server_active"
+                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+                    server, upstream, peer->conns);
+    p = ngx_sprintf(p, "nginxplus_stream_upstream_server_limit"
+                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+                    server, upstream, peer->max_conns);
+    p = ngx_sprintf(p, "nginxplus_stream_upstream_server_fails"
+                    "{server=\"%V\",upstream=\"%V\"} %ui" CRLF,
+                    server, upstream, peer->fails);
+
+    return p;
+}
+
+
+static ngx_uint_t
+ngx_http_api_stream_peer_state(ngx_stream_upstream_rr_peer_t *peer)
+{
+    if (peer->down & NGX_STREAM_UPSTREAM_FAILED) {
+        return 3;
+    }
+
+    if (peer->max_fails && peer->fails >= peer->max_fails) {
+        return 4;
+    }
+
+    if (peer->down & NGX_STREAM_UPSTREAM_HC_DOWN) {
+        return 6;
+    }
+
+    return 1;
+}
+
+
 static ngx_int_t
 ngx_http_api_stream_move_peer(ngx_stream_upstream_rr_peers_t *peers,
     ngx_stream_upstream_rr_peers_t *src, ngx_stream_upstream_rr_peer_t *peer,
@@ -2322,6 +2599,28 @@ ngx_http_api_upstream_buffer(ngx_http_request_t *r, ngx_uint_t peers)
     size = 8192 + peers * 1024;
 
     return ngx_create_temp_buf(r->pool, size);
+}
+
+
+static ngx_int_t
+ngx_http_api_valid_label(ngx_str_t *name)
+{
+    size_t  i;
+
+    if (name->len == 0) {
+        return NGX_ERROR;
+    }
+
+    for (i = 0; i < name->len; i++) {
+        if (name->data[i] < 0x20
+            || name->data[i] == '"'
+            || name->data[i] == '\\')
+        {
+            return NGX_ERROR;
+        }
+    }
+
+    return NGX_OK;
 }
 
 

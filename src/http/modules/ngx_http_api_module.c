@@ -15,30 +15,6 @@
 
 
 typedef struct {
-    ngx_atomic_t                  processing;
-    ngx_atomic_t                  requests;
-    ngx_atomic_t                  responses[5];
-    ngx_atomic_t                  responses_total;
-    ngx_atomic_t                  discarded;
-    ngx_atomic_t                  received;
-    ngx_atomic_t                  sent;
-} ngx_http_api_zone_shctx_t;
-
-
-typedef struct {
-    ngx_str_t                     name;
-    ngx_slab_pool_t              *shpool;
-    ngx_http_api_zone_shctx_t    *sh;
-} ngx_http_api_zone_ctx_t;
-
-
-typedef struct {
-    ngx_array_t                  *zones;
-    ngx_uint_t                    api;
-} ngx_http_api_main_conf_t;
-
-
-typedef struct {
     ngx_shm_zone_t               *status_zone;
     ngx_flag_t                    write;
 } ngx_http_api_loc_conf_t;
@@ -212,6 +188,13 @@ ngx_http_api_process(ngx_http_request_t *r)
         return ngx_http_api_slabs(r);
     }
 
+    if (r->uri.len == sizeof("/api/9/prometheus") - 1
+        && ngx_strncmp(r->uri.data, "/api/9/prometheus",
+                       sizeof("/api/9/prometheus") - 1) == 0)
+    {
+        return ngx_http_api_prometheus(r);
+    }
+
     rc = ngx_http_api_caches(r);
     if (rc != NGX_DECLINED) {
         return rc;
@@ -244,6 +227,34 @@ ngx_http_api_send_status(ngx_http_request_t *r, ngx_buf_t *b,
     r->headers_out.content_length_n = b->last - b->pos;
     r->headers_out.content_type_len = sizeof("application/json") - 1;
     ngx_str_set(&r->headers_out.content_type, "application/json");
+    r->headers_out.content_type_lowcase = NULL;
+
+    b->last_buf = (r == r->main) ? 1 : 0;
+    b->last_in_chain = 1;
+
+    out.buf = b;
+    out.next = NULL;
+
+    rc = ngx_http_send_header(r);
+    if (rc == NGX_ERROR || rc > NGX_OK || r->header_only) {
+        return rc;
+    }
+
+    return ngx_http_output_filter(r, &out);
+}
+
+
+ngx_int_t
+ngx_http_api_send_prometheus(ngx_http_request_t *r, ngx_buf_t *b)
+{
+    ngx_int_t    rc;
+    ngx_chain_t  out;
+
+    r->headers_out.status = NGX_HTTP_OK;
+    r->headers_out.content_length_n = b->last - b->pos;
+    r->headers_out.content_type_len =
+        sizeof("text/plain; version=0.0.4") - 1;
+    ngx_str_set(&r->headers_out.content_type, "text/plain; version=0.0.4");
     r->headers_out.content_type_lowcase = NULL;
 
     b->last_buf = (r == r->main) ? 1 : 0;

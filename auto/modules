@@ -632,6 +632,7 @@ if [ $HTTP = YES ]; then
         ngx_module_incs=src/stream
         ngx_module_deps=src/http/modules/ngx_http_api_module.h
         ngx_module_srcs="src/http/modules/ngx_http_api_module.c \
+                         src/http/modules/ngx_http_api_prometheus.c \
                          src/http/modules/ngx_http_api_cache.c \
                          src/http/modules/ngx_http_api_upstream.c"
         ngx_module_libs=

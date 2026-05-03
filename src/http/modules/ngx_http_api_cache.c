@@ -20,6 +20,9 @@ static u_char *ngx_http_api_cache_write(u_char *p, ngx_http_file_cache_t *cache,
     ngx_uint_t name);
 static u_char *ngx_http_api_cache_write_group(u_char *p, const char *name,
     ngx_atomic_uint_t responses, ngx_uint_t written);
+static u_char *ngx_http_api_cache_prometheus_group(u_char *p,
+    ngx_str_t *cache, const char *name, ngx_atomic_uint_t responses,
+    ngx_uint_t written);
 static void ngx_http_api_cache_reset(ngx_http_file_cache_t *cache);
 
 #endif
@@ -81,6 +84,56 @@ ngx_http_api_caches(ngx_http_request_t *r)
 #else
     return NGX_DECLINED;
 #endif
+}
+
+
+u_char *
+ngx_http_api_prometheus_caches(u_char *p)
+{
+#if (NGX_HTTP_CACHE)
+    off_t                         size, max_size;
+    ngx_uint_t                    i;
+    ngx_http_file_cache_t       **caches, *cache;
+    ngx_http_file_cache_stats_t  *stats;
+
+    if (ngx_http_file_caches == NULL) {
+        return p;
+    }
+
+    caches = ngx_http_file_caches->elts;
+
+    for (i = 0; i < ngx_http_file_caches->nelts; i++) {
+        cache = caches[i];
+        stats = &cache->sh->stats;
+        size = cache->sh->size * cache->bsize;
+        max_size = cache->max_size * cache->bsize;
+
+        p = ngx_sprintf(p, "nginxplus_cache_size{cache=\"%V\"} %O" CRLF,
+                        &cache->shm_zone->shm.name, size);
+        p = ngx_sprintf(p, "nginxplus_cache_max_size{cache=\"%V\"} %O" CRLF,
+                        &cache->shm_zone->shm.name, max_size);
+        p = ngx_sprintf(p, "nginxplus_cache_cold{cache=\"%V\"} %ui" CRLF,
+                        &cache->shm_zone->shm.name, cache->sh->cold ? 1 : 0);
+
+        p = ngx_http_api_cache_prometheus_group(p, &cache->shm_zone->shm.name,
+            "hit", stats->responses[NGX_HTTP_CACHE_HIT - 1], 0);
+        p = ngx_http_api_cache_prometheus_group(p, &cache->shm_zone->shm.name,
+            "stale", stats->responses[NGX_HTTP_CACHE_STALE - 1], 0);
+        p = ngx_http_api_cache_prometheus_group(p, &cache->shm_zone->shm.name,
+            "updating", stats->responses[NGX_HTTP_CACHE_UPDATING - 1], 0);
+        p = ngx_http_api_cache_prometheus_group(p, &cache->shm_zone->shm.name,
+            "revalidated",
+            stats->responses[NGX_HTTP_CACHE_REVALIDATED - 1], 0);
+        p = ngx_http_api_cache_prometheus_group(p, &cache->shm_zone->shm.name,
+            "miss", stats->responses[NGX_HTTP_CACHE_MISS - 1], 1);
+        p = ngx_http_api_cache_prometheus_group(p, &cache->shm_zone->shm.name,
+            "expired", stats->responses[NGX_HTTP_CACHE_EXPIRED - 1], 1);
+        p = ngx_http_api_cache_prometheus_group(p, &cache->shm_zone->shm.name,
+            "bypass", stats->responses[NGX_HTTP_CACHE_BYPASS - 1], 1);
+    }
+#endif
+
+    return p;
 }
 
 
@@ -264,6 +317,30 @@ ngx_http_api_cache_write_group(u_char *p, const char *name,
 
     return ngx_sprintf(p, "\"%s\":{\"responses\":%uA,\"bytes\":0}",
                        name, responses);
+}
+
+
+static u_char *
+ngx_http_api_cache_prometheus_group(u_char *p, ngx_str_t *cache,
+    const char *name, ngx_atomic_uint_t responses, ngx_uint_t written)
+{
+    p = ngx_sprintf(p, "nginxplus_cache_%s_responses"
+                    "{cache=\"%V\"} %uA" CRLF,
+                    name, cache, responses);
+    p = ngx_sprintf(p, "nginxplus_cache_%s_bytes"
+                    "{cache=\"%V\"} 0" CRLF,
+                    name, cache);
+
+    if (written) {
+        p = ngx_sprintf(p, "nginxplus_cache_%s_responses_written"
+                        "{cache=\"%V\"} 0" CRLF,
+                        name, cache);
+        p = ngx_sprintf(p, "nginxplus_cache_%s_bytes_written"
+                        "{cache=\"%V\"} 0" CRLF,
+                        name, cache);
+    }
+
+    return p;
 }
 
 
