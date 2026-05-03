@@ -12,6 +12,13 @@
 
 
 #define NGX_HTTP_CACHE_PURGE_RETAIN  60
+#define NGX_HTTP_FILE_CACHE_SH_VERSION  0x43414348
+
+#define NGX_HTTP_FILE_CACHE_SLAB_PAGE_MASK   3
+#define NGX_HTTP_FILE_CACHE_SLAB_BIG         1
+#define NGX_HTTP_FILE_CACHE_SLAB_EXACT       2
+#define NGX_HTTP_FILE_CACHE_SLAB_SMALL       3
+#define NGX_HTTP_FILE_CACHE_SLAB_SHIFT_MASK  0x0f
 
 
 typedef struct {
@@ -113,6 +120,9 @@ static ngx_int_t ngx_http_file_cache_add(ngx_http_file_cache_t *cache,
 static ngx_int_t ngx_http_file_cache_delete_file(ngx_tree_ctx_t *ctx,
     ngx_str_t *path);
 static void ngx_http_file_cache_set_watermark(ngx_http_file_cache_t *cache);
+static ngx_int_t ngx_http_file_cache_check_shm(ngx_shm_zone_t *shm_zone,
+    ngx_http_file_cache_t *cache);
+static size_t ngx_http_file_cache_slab_size(ngx_slab_pool_t *pool, void *p);
 
 
 ngx_str_t  ngx_http_cache_status[] = {
@@ -170,6 +180,10 @@ ngx_http_file_cache_init(ngx_shm_zone_t *shm_zone, void *data)
 
         cache->max_size /= cache->bsize;
 
+        if (ngx_http_file_cache_check_shm(shm_zone, cache) != NGX_OK) {
+            return NGX_ERROR;
+        }
+
         if (!cache->sh->cold || cache->sh->loading) {
             cache->path->loader = NULL;
         }
@@ -181,6 +195,10 @@ ngx_http_file_cache_init(ngx_shm_zone_t *shm_zone, void *data)
 
     if (shm_zone->shm.exists) {
         cache->sh = cache->shpool->data;
+        if (ngx_http_file_cache_check_shm(shm_zone, cache) != NGX_OK) {
+            return NGX_ERROR;
+        }
+
         cache->bsize = ngx_fs_bsize(cache->path->name.data);
         cache->max_size /= cache->bsize;
 
@@ -204,6 +222,7 @@ ngx_http_file_cache_init(ngx_shm_zone_t *shm_zone, void *data)
     cache->sh->count = 0;
     cache->sh->watermark = (ngx_uint_t) -1;
     ngx_memzero(&cache->sh->stats, sizeof(ngx_http_file_cache_stats_t));
+    cache->sh->version = NGX_HTTP_FILE_CACHE_SH_VERSION;
 
     cache->bsize = ngx_fs_bsize(cache->path->name.data);
 
@@ -222,6 +241,67 @@ ngx_http_file_cache_init(ngx_shm_zone_t *shm_zone, void *data)
     cache->shpool->log_nomem = 0;
 
     return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_file_cache_check_shm(ngx_shm_zone_t *shm_zone,
+    ngx_http_file_cache_t *cache)
+{
+    size_t  size;
+
+    if (cache->sh == NULL) {
+        ngx_log_error(NGX_LOG_EMERG, shm_zone->shm.log, 0,
+                      "cache \"%V\" has no shared memory state",
+                      &shm_zone->shm.name);
+        return NGX_ERROR;
+    }
+
+    size = ngx_http_file_cache_slab_size(cache->shpool, cache->sh);
+
+    if (size < sizeof(ngx_http_file_cache_sh_t)
+        || cache->sh->version != NGX_HTTP_FILE_CACHE_SH_VERSION)
+    {
+        ngx_log_error(NGX_LOG_EMERG, shm_zone->shm.log, 0,
+                      "cache \"%V\" has incompatible shared memory zone "
+                      "layout",
+                      &shm_zone->shm.name);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+static size_t
+ngx_http_file_cache_slab_size(ngx_slab_pool_t *pool, void *p)
+{
+    uintptr_t         slab;
+    ngx_uint_t        n, type, shift;
+    ngx_slab_page_t  *page;
+
+    if (p == NULL || (u_char *) p < pool->start || (u_char *) p >= pool->end) {
+        return 0;
+    }
+
+    n = ((u_char *) p - pool->start) >> ngx_pagesize_shift;
+    page = &pool->pages[n];
+    slab = page->slab;
+    type = page->prev & NGX_HTTP_FILE_CACHE_SLAB_PAGE_MASK;
+
+    switch (type) {
+
+    case NGX_HTTP_FILE_CACHE_SLAB_SMALL:
+    case NGX_HTTP_FILE_CACHE_SLAB_BIG:
+        shift = slab & NGX_HTTP_FILE_CACHE_SLAB_SHIFT_MASK;
+        return (size_t) 1 << shift;
+
+    case NGX_HTTP_FILE_CACHE_SLAB_EXACT:
+        return ngx_pagesize / (8 * sizeof(uintptr_t));
+
+    default:
+        return ngx_pagesize;
+    }
 }
 
 

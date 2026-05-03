@@ -161,6 +161,7 @@ typedef struct {
     ngx_uint_t                       count;
     ngx_uint_t                       watermark;
     ngx_http_file_cache_stats_t      stats;
+    ngx_uint_t                       version;
 } ngx_http_file_cache_sh_t;
 
 

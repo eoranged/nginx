@@ -662,7 +662,8 @@ ngx_http_api_valid_name(ngx_str_t *name)
     }
 
     for (i = 0; i < name->len; i++) {
-        if (name->data[i] < 0x20 || name->data[i] == '"'
+        if (name->data[i] < 0x20 || name->data[i] == '/'
+            || name->data[i] == '"'
             || name->data[i] == '\\')
         {
             return NGX_ERROR;
