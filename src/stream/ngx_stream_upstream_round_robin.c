@@ -139,6 +139,21 @@ ngx_stream_upstream_init_round_robin(ngx_conf_t *cf,
 #endif
 
         if (n + r == 0) {
+#if (NGX_STREAM_UPSTREAM_ZONE)
+            if (us->state.len && us->shm_zone) {
+                peers = ngx_pcalloc(cf->pool,
+                                     sizeof(ngx_stream_upstream_rr_peers_t));
+                if (peers == NULL) {
+                    return NGX_ERROR;
+                }
+
+                peers->name = &us->host;
+                us->peer.data = peers;
+
+                return NGX_OK;
+            }
+#endif
+
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "no servers in upstream \"%V\" in %s:%ui",
                           &us->host, us->file_name, us->line);

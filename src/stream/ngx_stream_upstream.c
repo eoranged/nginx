@@ -23,6 +23,8 @@ static char *ngx_stream_upstream(ngx_conf_t *cf, ngx_command_t *cmd,
 static char *ngx_stream_upstream_server(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 #if (NGX_STREAM_UPSTREAM_ZONE)
+static char *ngx_stream_upstream_state(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static char *ngx_stream_upstream_resolver(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 #endif
@@ -48,6 +50,13 @@ static ngx_command_t  ngx_stream_upstream_commands[] = {
       NULL },
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
+
+    { ngx_string("state"),
+      NGX_STREAM_UPS_CONF|NGX_CONF_TAKE1,
+      ngx_stream_upstream_state,
+      NGX_STREAM_SRV_CONF_OFFSET,
+      0,
+      NULL },
 
     { ngx_string("resolver"),
       NGX_STREAM_UPS_CONF|NGX_CONF_1MORE,
@@ -412,7 +421,12 @@ ngx_stream_upstream(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
         return rv;
     }
 
-    if (uscf->servers->nelts == 0) {
+    if (uscf->servers->nelts == 0
+#if (NGX_STREAM_UPSTREAM_ZONE)
+        && uscf->state.len == 0
+#endif
+        )
+    {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "no servers are inside upstream");
         return NGX_CONF_ERROR;
@@ -685,6 +699,28 @@ not_supported:
 
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
+
+static char *
+ngx_stream_upstream_state(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_stream_upstream_srv_conf_t  *uscf = conf;
+
+    ngx_str_t  *value;
+
+    if (uscf->state.data) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+    uscf->state = value[1];
+
+    if (ngx_conf_full_name(cf->cycle, &uscf->state, 0) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    return ngx_conf_parse(cf, &uscf->state);
+}
+
 
 static char *
 ngx_stream_upstream_resolver(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)

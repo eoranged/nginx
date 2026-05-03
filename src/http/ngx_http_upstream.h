@@ -144,6 +144,7 @@ struct ngx_http_upstream_srv_conf_s {
 
 #if (NGX_HTTP_UPSTREAM_ZONE)
     ngx_shm_zone_t                  *shm_zone;
+    ngx_str_t                        state;
     ngx_resolver_t                  *resolver;
     ngx_msec_t                       resolver_timeout;
 #endif

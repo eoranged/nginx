@@ -85,6 +85,12 @@ static void ngx_http_api_http_peers_wlock(
     ngx_http_upstream_rr_peers_t *peers);
 static void ngx_http_api_http_peers_unlock(
     ngx_http_upstream_rr_peers_t *peers);
+static ngx_int_t ngx_http_api_http_state_save(ngx_http_request_t *r,
+    ngx_http_upstream_srv_conf_t *uscf);
+static size_t ngx_http_api_http_state_peer_size(
+    ngx_http_upstream_rr_peer_t *peer, ngx_uint_t backup);
+static u_char *ngx_http_api_http_write_state_peer(u_char *p,
+    ngx_http_upstream_rr_peer_t *peer, ngx_uint_t backup);
 static u_char *ngx_http_api_http_write_peer(u_char *p,
     ngx_http_upstream_rr_peer_t *peer, ngx_uint_t id, ngx_uint_t backup);
 static ngx_int_t ngx_http_api_http_write_servers(ngx_http_request_t *r,
@@ -139,6 +145,12 @@ static void ngx_http_api_stream_peers_wlock(
     ngx_stream_upstream_rr_peers_t *peers);
 static void ngx_http_api_stream_peers_unlock(
     ngx_stream_upstream_rr_peers_t *peers);
+static ngx_int_t ngx_http_api_stream_state_save(ngx_http_request_t *r,
+    ngx_stream_upstream_srv_conf_t *uscf);
+static size_t ngx_http_api_stream_state_peer_size(
+    ngx_stream_upstream_rr_peer_t *peer, ngx_uint_t backup);
+static u_char *ngx_http_api_stream_write_state_peer(u_char *p,
+    ngx_stream_upstream_rr_peer_t *peer, ngx_uint_t backup);
 static u_char *ngx_http_api_stream_write_peer(u_char *p,
     ngx_stream_upstream_rr_peer_t *peer, ngx_uint_t id, ngx_uint_t backup);
 static ngx_int_t ngx_http_api_stream_write_servers(ngx_http_request_t *r,
@@ -159,6 +171,7 @@ static ngx_int_t ngx_http_api_parse_json(ngx_http_request_t *r,
     ngx_http_api_peer_conf_t *pcf, ngx_uint_t post);
 static ngx_int_t ngx_http_api_json_string(u_char **pos, u_char *last,
     ngx_str_t *value);
+static ngx_int_t ngx_http_api_conf_token(ngx_str_t *value);
 static ngx_int_t ngx_http_api_json_bool(u_char **pos, u_char *last,
     ngx_flag_t *value);
 static ngx_int_t ngx_http_api_json_int(u_char **pos, u_char *last,
@@ -656,6 +669,10 @@ ngx_http_api_http_server_post(ngx_http_request_t *r,
         return ngx_http_api_error(r, NGX_HTTP_CONFLICT, "duplicate server");
     }
 
+    if (rc == NGX_ABORT) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     if (rc != NGX_OK) {
         return ngx_http_api_error(r, NGX_HTTP_BAD_REQUEST, "invalid server");
     }
@@ -749,6 +766,12 @@ ngx_http_api_http_server_patch(ngx_http_request_t *r,
     }
 
     ngx_http_api_http_recount(peers);
+
+    if (ngx_http_api_http_state_save(r, uscf) != NGX_OK) {
+        ngx_http_api_http_peers_unlock(peers);
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     id = ngx_http_api_http_peer_id(peers, peer);
 
     b = ngx_http_api_upstream_buffer(r, 1);
@@ -803,6 +826,11 @@ ngx_http_api_http_server_delete(ngx_http_request_t *r,
     ngx_http_api_http_recount(peers);
 
     ngx_http_upstream_rr_peer_free(peer_peers, peer);
+
+    if (ngx_http_api_http_state_save(r, uscf) != NGX_OK) {
+        ngx_http_api_http_peers_unlock(peers);
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
 
     ngx_http_api_http_peers_unlock(peers);
 
@@ -1033,6 +1061,11 @@ ngx_http_api_http_add_peer(ngx_http_request_t *r,
 
     ngx_http_api_http_recount(peers);
 
+    if (ngx_http_api_http_state_save(r, uscf) != NGX_OK) {
+        ngx_http_api_http_peers_unlock(peers);
+        return NGX_ABORT;
+    }
+
     id = (target == peers) ? target->number - 1
                            : peers->number + target->number - 1;
 
@@ -1166,6 +1199,194 @@ ngx_http_api_http_peers_unlock(ngx_http_upstream_rr_peers_t *peers)
     }
 
     ngx_http_upstream_rr_peers_unlock(peers);
+}
+
+
+static ngx_int_t
+ngx_http_api_http_state_save(ngx_http_request_t *r,
+    ngx_http_upstream_srv_conf_t *uscf)
+{
+    size_t                         len;
+    ssize_t                        n;
+    u_char                        *p, *start;
+    ngx_file_t                     file;
+    ngx_http_upstream_rr_peer_t   *peer;
+    ngx_http_upstream_rr_peers_t  *peers;
+
+    if (uscf->state.len == 0) {
+        return NGX_OK;
+    }
+
+    peers = uscf->peer.data;
+    len = 0;
+
+    for (peer = peers->peer; peer; peer = peer->next) {
+        len += ngx_http_api_http_state_peer_size(peer, 0);
+    }
+
+    if (peers->next) {
+        for (peer = peers->next->peer; peer; peer = peer->next) {
+            len += ngx_http_api_http_state_peer_size(peer, 1);
+        }
+    }
+
+    start = len ? ngx_pnalloc(r->pool, len) : NULL;
+    if (len && start == NULL) {
+        return NGX_ERROR;
+    }
+
+    p = start;
+
+    for (peer = peers->peer; peer; peer = peer->next) {
+        p = ngx_http_api_http_write_state_peer(p, peer, 0);
+    }
+
+    if (peers->next) {
+        for (peer = peers->next->peer; peer; peer = peer->next) {
+            p = ngx_http_api_http_write_state_peer(p, peer, 1);
+        }
+    }
+
+    len = p ? (size_t) (p - start) : 0;
+
+    ngx_memzero(&file, sizeof(ngx_file_t));
+
+    file.name = uscf->state;
+    file.log = r->connection->log;
+    file.fd = ngx_open_file(uscf->state.data, NGX_FILE_WRONLY,
+                            NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS);
+
+    if (file.fd == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
+                      ngx_open_file_n " \"%V\" failed", &uscf->state);
+        return NGX_ERROR;
+    }
+
+    if (len) {
+        n = ngx_write_file(&file, start, len, 0);
+
+        if (n == NGX_ERROR || (size_t) n != len) {
+            if (n != NGX_ERROR) {
+                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                              ngx_write_fd_n " \"%V\" wrote only %z of %uz",
+                              &uscf->state, n, len);
+            }
+
+            (void) ngx_close_file(file.fd);
+            return NGX_ERROR;
+        }
+    }
+
+    if (ngx_close_file(file.fd) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
+                      ngx_close_file_n " \"%V\" failed", &uscf->state);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+static size_t
+ngx_http_api_http_state_peer_size(ngx_http_upstream_rr_peer_t *peer,
+    ngx_uint_t backup)
+{
+    size_t      len;
+    ngx_str_t  *server;
+
+    server = peer->server.len ? &peer->server : &peer->name;
+
+    len = sizeof("server ") - 1 + server->len + sizeof(";\n") - 1;
+
+    if (peer->weight != 1) {
+        len += sizeof(" weight=") - 1 + NGX_INT_T_LEN;
+    }
+
+    if (peer->max_conns != 0) {
+        len += sizeof(" max_conns=") - 1 + NGX_INT_T_LEN;
+    }
+
+    if (peer->max_fails != 1) {
+        len += sizeof(" max_fails=") - 1 + NGX_INT_T_LEN;
+    }
+
+    if (peer->fail_timeout != 10) {
+        len += sizeof(" fail_timeout=") - 1 + NGX_INT_T_LEN
+               + sizeof("s") - 1;
+    }
+
+    if (peer->slow_start != 0) {
+        len += sizeof(" slow_start=") - 1 + NGX_INT_T_LEN
+               + sizeof("ms") - 1;
+    }
+
+    if (backup) {
+        len += sizeof(" backup") - 1;
+    }
+
+    if (peer->down & NGX_HTTP_UPSTREAM_FAILED) {
+        len += sizeof(" down") - 1;
+    }
+
+#if (NGX_HTTP_UPSTREAM_STICKY)
+    if (peer->down & NGX_HTTP_UPSTREAM_DRAINING) {
+        len += sizeof(" drain") - 1;
+    }
+#endif
+
+    return len;
+}
+
+
+static u_char *
+ngx_http_api_http_write_state_peer(u_char *p,
+    ngx_http_upstream_rr_peer_t *peer, ngx_uint_t backup)
+{
+    ngx_str_t  *server;
+
+    server = peer->server.len ? &peer->server : &peer->name;
+
+    p = ngx_sprintf(p, "server %V", server);
+
+    if (peer->weight != 1) {
+        p = ngx_sprintf(p, " weight=%i", peer->weight);
+    }
+
+    if (peer->max_conns != 0) {
+        p = ngx_sprintf(p, " max_conns=%ui", peer->max_conns);
+    }
+
+    if (peer->max_fails != 1) {
+        p = ngx_sprintf(p, " max_fails=%ui", peer->max_fails);
+    }
+
+    if (peer->fail_timeout != 10) {
+        p = ngx_sprintf(p, " fail_timeout=%Ts", peer->fail_timeout);
+    }
+
+    if (peer->slow_start != 0) {
+        p = ngx_cpymem(p, " slow_start=", sizeof(" slow_start=") - 1);
+        p = ngx_http_api_time(p, peer->slow_start);
+    }
+
+    if (backup) {
+        p = ngx_cpymem(p, " backup", sizeof(" backup") - 1);
+    }
+
+    if (peer->down & NGX_HTTP_UPSTREAM_FAILED) {
+        p = ngx_cpymem(p, " down", sizeof(" down") - 1);
+    }
+
+#if (NGX_HTTP_UPSTREAM_STICKY)
+    if (peer->down & NGX_HTTP_UPSTREAM_DRAINING) {
+        p = ngx_cpymem(p, " drain", sizeof(" drain") - 1);
+    }
+#endif
+
+    *p++ = ';';
+    *p++ = LF;
+
+    return p;
 }
 
 
@@ -1689,6 +1910,10 @@ ngx_http_api_stream_server_post(ngx_http_request_t *r,
         return ngx_http_api_error(r, NGX_HTTP_CONFLICT, "duplicate server");
     }
 
+    if (rc == NGX_ABORT) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     if (rc != NGX_OK) {
         return ngx_http_api_error(r, NGX_HTTP_BAD_REQUEST, "invalid server");
     }
@@ -1770,6 +1995,12 @@ ngx_http_api_stream_server_patch(ngx_http_request_t *r,
     }
 
     ngx_http_api_stream_recount(peers);
+
+    if (ngx_http_api_stream_state_save(r, uscf) != NGX_OK) {
+        ngx_http_api_stream_peers_unlock(peers);
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     id = ngx_http_api_stream_peer_id(peers, peer);
 
     b = ngx_http_api_upstream_buffer(r, 1);
@@ -1824,6 +2055,11 @@ ngx_http_api_stream_server_delete(ngx_http_request_t *r,
     ngx_http_api_stream_recount(peers);
 
     ngx_stream_upstream_rr_peer_free(peer_peers, peer);
+
+    if (ngx_http_api_stream_state_save(r, uscf) != NGX_OK) {
+        ngx_http_api_stream_peers_unlock(peers);
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
 
     ngx_http_api_stream_peers_unlock(peers);
 
@@ -2031,6 +2267,11 @@ ngx_http_api_stream_add_peer(ngx_http_request_t *r,
 
     ngx_http_api_stream_recount(peers);
 
+    if (ngx_http_api_stream_state_save(r, uscf) != NGX_OK) {
+        ngx_http_api_stream_peers_unlock(peers);
+        return NGX_ABORT;
+    }
+
     id = (target == peers) ? target->number - 1
                            : peers->number + target->number - 1;
 
@@ -2164,6 +2405,182 @@ ngx_http_api_stream_peers_unlock(ngx_stream_upstream_rr_peers_t *peers)
     }
 
     ngx_stream_upstream_rr_peers_unlock(peers);
+}
+
+
+static ngx_int_t
+ngx_http_api_stream_state_save(ngx_http_request_t *r,
+    ngx_stream_upstream_srv_conf_t *uscf)
+{
+    size_t                           len;
+    ssize_t                          n;
+    u_char                          *p, *start;
+    ngx_file_t                       file;
+    ngx_stream_upstream_rr_peer_t   *peer;
+    ngx_stream_upstream_rr_peers_t  *peers;
+
+    if (uscf->state.len == 0) {
+        return NGX_OK;
+    }
+
+    peers = uscf->peer.data;
+    len = 0;
+
+    for (peer = peers->peer; peer; peer = peer->next) {
+        len += ngx_http_api_stream_state_peer_size(peer, 0);
+    }
+
+    if (peers->next) {
+        for (peer = peers->next->peer; peer; peer = peer->next) {
+            len += ngx_http_api_stream_state_peer_size(peer, 1);
+        }
+    }
+
+    start = len ? ngx_pnalloc(r->pool, len) : NULL;
+    if (len && start == NULL) {
+        return NGX_ERROR;
+    }
+
+    p = start;
+
+    for (peer = peers->peer; peer; peer = peer->next) {
+        p = ngx_http_api_stream_write_state_peer(p, peer, 0);
+    }
+
+    if (peers->next) {
+        for (peer = peers->next->peer; peer; peer = peer->next) {
+            p = ngx_http_api_stream_write_state_peer(p, peer, 1);
+        }
+    }
+
+    len = p ? (size_t) (p - start) : 0;
+
+    ngx_memzero(&file, sizeof(ngx_file_t));
+
+    file.name = uscf->state;
+    file.log = r->connection->log;
+    file.fd = ngx_open_file(uscf->state.data, NGX_FILE_WRONLY,
+                            NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS);
+
+    if (file.fd == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
+                      ngx_open_file_n " \"%V\" failed", &uscf->state);
+        return NGX_ERROR;
+    }
+
+    if (len) {
+        n = ngx_write_file(&file, start, len, 0);
+
+        if (n == NGX_ERROR || (size_t) n != len) {
+            if (n != NGX_ERROR) {
+                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                              ngx_write_fd_n " \"%V\" wrote only %z of %uz",
+                              &uscf->state, n, len);
+            }
+
+            (void) ngx_close_file(file.fd);
+            return NGX_ERROR;
+        }
+    }
+
+    if (ngx_close_file(file.fd) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
+                      ngx_close_file_n " \"%V\" failed", &uscf->state);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+
+static size_t
+ngx_http_api_stream_state_peer_size(ngx_stream_upstream_rr_peer_t *peer,
+    ngx_uint_t backup)
+{
+    size_t      len;
+    ngx_str_t  *server;
+
+    server = peer->server.len ? &peer->server : &peer->name;
+
+    len = sizeof("server ") - 1 + server->len + sizeof(";\n") - 1;
+
+    if (peer->weight != 1) {
+        len += sizeof(" weight=") - 1 + NGX_INT_T_LEN;
+    }
+
+    if (peer->max_conns != 0) {
+        len += sizeof(" max_conns=") - 1 + NGX_INT_T_LEN;
+    }
+
+    if (peer->max_fails != 1) {
+        len += sizeof(" max_fails=") - 1 + NGX_INT_T_LEN;
+    }
+
+    if (peer->fail_timeout != 10) {
+        len += sizeof(" fail_timeout=") - 1 + NGX_INT_T_LEN
+               + sizeof("s") - 1;
+    }
+
+    if (peer->slow_start != 0) {
+        len += sizeof(" slow_start=") - 1 + NGX_INT_T_LEN
+               + sizeof("ms") - 1;
+    }
+
+    if (backup) {
+        len += sizeof(" backup") - 1;
+    }
+
+    if (peer->down & NGX_STREAM_UPSTREAM_FAILED) {
+        len += sizeof(" down") - 1;
+    }
+
+    return len;
+}
+
+
+static u_char *
+ngx_http_api_stream_write_state_peer(u_char *p,
+    ngx_stream_upstream_rr_peer_t *peer, ngx_uint_t backup)
+{
+    ngx_str_t  *server;
+
+    server = peer->server.len ? &peer->server : &peer->name;
+
+    p = ngx_sprintf(p, "server %V", server);
+
+    if (peer->weight != 1) {
+        p = ngx_sprintf(p, " weight=%i", peer->weight);
+    }
+
+    if (peer->max_conns != 0) {
+        p = ngx_sprintf(p, " max_conns=%ui", peer->max_conns);
+    }
+
+    if (peer->max_fails != 1) {
+        p = ngx_sprintf(p, " max_fails=%ui", peer->max_fails);
+    }
+
+    if (peer->fail_timeout != 10) {
+        p = ngx_sprintf(p, " fail_timeout=%Ts", peer->fail_timeout);
+    }
+
+    if (peer->slow_start != 0) {
+        p = ngx_cpymem(p, " slow_start=", sizeof(" slow_start=") - 1);
+        p = ngx_http_api_time(p, peer->slow_start);
+    }
+
+    if (backup) {
+        p = ngx_cpymem(p, " backup", sizeof(" backup") - 1);
+    }
+
+    if (peer->down & NGX_STREAM_UPSTREAM_FAILED) {
+        p = ngx_cpymem(p, " down", sizeof(" down") - 1);
+    }
+
+    *p++ = ';';
+    *p++ = LF;
+
+    return p;
 }
 
 
@@ -2449,6 +2866,10 @@ ngx_http_api_parse_json(ngx_http_request_t *r, ngx_http_api_peer_conf_t *pcf,
                 return NGX_ERROR;
             }
 
+            if (ngx_http_api_conf_token(&value) != NGX_OK) {
+                return NGX_ERROR;
+            }
+
             pcf->server = value;
             pcf->server_set = 1;
 
@@ -2613,6 +3034,26 @@ ngx_http_api_json_string(u_char **pos, u_char *last, ngx_str_t *value)
     }
 
     return NGX_ERROR;
+}
+
+
+static ngx_int_t
+ngx_http_api_conf_token(ngx_str_t *value)
+{
+    size_t  i;
+    u_char  ch;
+
+    for (i = 0; i < value->len; i++) {
+        ch = value->data[i];
+
+        if (ch <= ' ' || ch == '\\' || ch == '"' || ch == '\''
+            || ch == ';' || ch == '{' || ch == '}')
+        {
+            return NGX_ERROR;
+        }
+    }
+
+    return value->len ? NGX_OK : NGX_ERROR;
 }
 
 
