@@ -8,6 +8,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 #include <ngx_md5.h>
+#include <ngx_http_upstream_round_robin.h>
 
 
 #define NGX_HTTP_STICKY_COOKIE_MAX_EXPIRES  2145916555
@@ -418,6 +419,15 @@ ngx_http_upstream_sticky_free_peer(ngx_peer_connection_t *pc, void *data,
     }
 
 done:
+
+    if (stp->original_free_peer == ngx_http_upstream_free_round_robin_peer) {
+        ngx_peer_connection_t  rrp_pc;
+
+        rrp_pc = *pc;
+        rrp_pc.data = stp->original_data;
+
+        ngx_http_upstream_rr_peer_stats(&rrp_pc, stp->request->upstream->state);
+    }
 
     stp->original_free_peer(pc, stp->original_data, state);
 }

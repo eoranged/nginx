@@ -8,6 +8,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <ngx_http_upstream_round_robin.h>
 #include <ngx_http_upstream_keepalive_module.h>
 
 
@@ -403,6 +404,15 @@ ngx_http_upstream_free_keepalive_peer(ngx_peer_connection_t *pc, void *data,
     }
 
 invalid:
+
+    if (kp->original_free_peer == ngx_http_upstream_free_round_robin_peer) {
+        ngx_peer_connection_t  rrp_pc;
+
+        rrp_pc = *pc;
+        rrp_pc.data = kp->data;
+
+        ngx_http_upstream_rr_peer_stats(&rrp_pc, u->state);
+    }
 
     kp->original_free_peer(pc, kp->data, state);
 }

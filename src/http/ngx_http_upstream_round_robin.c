@@ -534,6 +534,7 @@ ngx_http_upstream_init_round_robin_peer(ngx_http_request_t *r,
 
     rrp->peers = us->peer.data;
     rrp->current = NULL;
+    rrp->state = NULL;
 
     ngx_http_upstream_rr_peers_rlock(rrp->peers);
 
@@ -668,6 +669,7 @@ ngx_http_upstream_create_round_robin_peer(ngx_http_request_t *r,
 
     rrp->peers = peers;
     rrp->current = NULL;
+    rrp->state = NULL;
     rrp->config = 0;
 
     if (rrp->peers->number <= 8 * sizeof(uintptr_t)) {
