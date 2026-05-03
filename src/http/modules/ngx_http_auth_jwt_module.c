@@ -1081,6 +1081,9 @@ ngx_http_auth_jwt_key_cache_save(ngx_http_request_t *r,
     alcf->cache_key.len = key->len;
     alcf->cache_expire = ngx_time() + alcf->key_cache;
 
+    jwks->data = p;
+    jwks->len = alcf->cache.len;
+
     return NGX_OK;
 }
 
