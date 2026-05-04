@@ -19,6 +19,9 @@ static ngx_http_upstream_rr_peers_t *ngx_http_upstream_zone_copy_peers(
     ngx_http_upstream_srv_conf_t *ouscf);
 static ngx_http_upstream_rr_peer_t *ngx_http_upstream_zone_copy_peer(
     ngx_http_upstream_rr_peers_t *peers, ngx_http_upstream_rr_peer_t *src);
+static void ngx_http_upstream_zone_copy_hc(
+    ngx_http_upstream_rr_peers_t *peers,
+    ngx_http_upstream_rr_peers_t *opeers);
 static ngx_int_t ngx_http_upstream_zone_preresolve(
     ngx_http_upstream_rr_peer_t *resolve,
     ngx_http_upstream_rr_peers_t *peers,
@@ -28,6 +31,17 @@ static void ngx_http_upstream_zone_set_single(
     ngx_http_upstream_srv_conf_t *uscf);
 static void ngx_http_upstream_zone_remove_peer_locked(
     ngx_http_upstream_rr_peers_t *peers, ngx_http_upstream_rr_peer_t *peer);
+static ngx_int_t ngx_http_upstream_zone_cmp_resolved(const void *one,
+    const void *two);
+static ngx_int_t ngx_http_upstream_zone_cmp_sockaddr(struct sockaddr *one,
+    socklen_t one_len, struct sockaddr *two, socklen_t two_len);
+static ngx_int_t ngx_http_upstream_zone_addr_match(
+    ngx_http_upstream_rr_peer_t *peer, ngx_http_upstream_rr_peer_t *template,
+    ngx_http_upstream_host_t *host, ngx_resolver_addr_t *addr);
+static void ngx_http_upstream_zone_sort_peers(
+    ngx_http_upstream_rr_peers_t *peers, ngx_http_upstream_host_t *host,
+    ngx_http_upstream_rr_peer_t *template, ngx_resolver_addr_t *addrs,
+    ngx_uint_t naddrs, ngx_uint_t backup, u_short min_priority);
 static ngx_int_t ngx_http_upstream_zone_init_worker(ngx_cycle_t *cycle);
 static void ngx_http_upstream_zone_resolve_timer(ngx_event_t *event);
 static void ngx_http_upstream_zone_resolve_handler(ngx_resolver_ctx_t *ctx);
@@ -280,6 +294,8 @@ ngx_http_upstream_zone_copy_peers(ngx_slab_pool_t *shpool,
         (*peers->config)++;
     }
 
+    ngx_http_upstream_zone_copy_hc(peers, opeers);
+
     for (peerp = &peers->resolve; *peerp; peerp = &peer->next) {
         peer = ngx_http_upstream_zone_copy_peer(peers, *peerp);
         if (peer == NULL) {
@@ -326,6 +342,8 @@ ngx_http_upstream_zone_copy_peers(ngx_slab_pool_t *shpool,
         *peerp = peer;
         (*backup->config)++;
     }
+
+    ngx_http_upstream_zone_copy_hc(backup, opeers ? opeers->next : NULL);
 
     for (peerp = &backup->resolve; *peerp; peerp = &peer->next) {
         peer = ngx_http_upstream_zone_copy_peer(backup, *peerp);
@@ -490,6 +508,54 @@ failed:
     ngx_slab_free_locked(pool, dst);
 
     return NULL;
+}
+
+
+static void
+ngx_http_upstream_zone_copy_hc(ngx_http_upstream_rr_peers_t *peers,
+    ngx_http_upstream_rr_peers_t *opeers)
+{
+    ngx_http_upstream_rr_peer_t  *peer, *opeer;
+
+    if (opeers == NULL) {
+        return;
+    }
+
+    peers->hc_active = opeers->hc_active;
+
+    if (!opeers->hc_active) {
+        return;
+    }
+
+    ngx_http_upstream_rr_peers_rlock(opeers);
+
+    for (peer = peers->peer; peer; peer = peer->next) {
+        peer->down |= NGX_HTTP_UPSTREAM_HC_DOWN;
+
+        for (opeer = opeers->peer; opeer; opeer = opeer->next) {
+
+            if (peer->server.len != opeer->server.len
+                || ngx_memcmp(peer->server.data, opeer->server.data,
+                              peer->server.len)
+                   != 0)
+            {
+                continue;
+            }
+
+            if (ngx_cmp_sockaddr(peer->sockaddr, peer->socklen,
+                                 opeer->sockaddr, opeer->socklen, 1)
+                != NGX_OK)
+            {
+                continue;
+            }
+
+            peer->down &= ~NGX_HTTP_UPSTREAM_HC_DOWN;
+            peer->down |= opeer->down & NGX_HTTP_UPSTREAM_HC_DOWN;
+            break;
+        }
+    }
+
+    ngx_http_upstream_rr_peers_unlock(opeers);
 }
 
 
@@ -777,7 +843,7 @@ ngx_http_upstream_zone_resolve_handler(ngx_resolver_ctx_t *ctx)
     ngx_msec_t                     timer;
     ngx_uint_t                     i, j, backup, addr_backup;
     ngx_event_t                   *event;
-    ngx_resolver_addr_t           *addr;
+    ngx_resolver_addr_t           *addr, *addrs;
     ngx_resolver_srv_name_t       *srv;
     ngx_http_upstream_host_t      *host;
     ngx_http_upstream_rr_peer_t   *peer, *template, **peerp;
@@ -838,8 +904,24 @@ ngx_http_upstream_zone_resolve_handler(ngx_resolver_ctx_t *ctx)
     backup = 0;
     min_priority = 65535;
 
+    addrs = ctx->addrs;
+
+    if (ctx->naddrs > 1) {
+        addrs = ngx_alloc(ctx->naddrs * sizeof(ngx_resolver_addr_t),
+                          event->log);
+        if (addrs == NULL) {
+            addrs = ctx->addrs;
+
+        } else {
+            ngx_memcpy(addrs, ctx->addrs,
+                       ctx->naddrs * sizeof(ngx_resolver_addr_t));
+            ngx_sort(addrs, ctx->naddrs, sizeof(ngx_resolver_addr_t),
+                     ngx_http_upstream_zone_cmp_resolved);
+        }
+    }
+
     for (i = 0; i < ctx->naddrs; i++) {
-        min_priority = ngx_min(ctx->addrs[i].priority, min_priority);
+        min_priority = ngx_min(addrs[i].priority, min_priority);
     }
 
 #if (NGX_DEBUG)
@@ -848,15 +930,15 @@ ngx_http_upstream_zone_resolve_handler(ngx_resolver_ctx_t *ctx)
     size_t  len;
 
     for (i = 0; i < ctx->naddrs; i++) {
-        len = ngx_sock_ntop(ctx->addrs[i].sockaddr, ctx->addrs[i].socklen,
+        len = ngx_sock_ntop(addrs[i].sockaddr, addrs[i].socklen,
                             text, NGX_SOCKADDR_STRLEN, 1);
 
         ngx_log_debug7(NGX_LOG_DEBUG_HTTP, event->log, 0,
                        "name %V was resolved to %*s "
                        "s:\"%V\" n:\"%V\" w:%d %s",
                        &host->name, len, text, &host->service,
-                       &ctx->addrs[i].name, ctx->addrs[i].weight,
-                       ctx->addrs[i].priority != min_priority ? "backup" : "");
+                       &addrs[i].name, addrs[i].weight,
+                       addrs[i].priority != min_priority ? "backup" : "");
     }
     }
 #endif
@@ -872,7 +954,7 @@ again:
 
         for (j = 0; j < ctx->naddrs; j++) {
 
-            addr = &ctx->addrs[j];
+            addr = &addrs[j];
 
             addr_backup = (addr->priority != min_priority);
             if (addr_backup != backup) {
@@ -923,7 +1005,7 @@ again:
 
     for (i = 0; i < ctx->naddrs; i++) {
 
-        addr = &ctx->addrs[i];
+        addr = &addrs[i];
 
         addr_backup = (addr->priority != min_priority);
         if (addr_backup != backup) {
@@ -1005,6 +1087,9 @@ again:
         ngx_http_upstream_zone_set_single(uscf);
     }
 
+    ngx_http_upstream_zone_sort_peers(peers, host, template, addrs,
+                                      ctx->naddrs, backup, min_priority);
+
     if (host->service.len && peers->next) {
         ngx_http_upstream_rr_peers_unlock(peers);
 
@@ -1023,7 +1108,11 @@ done:
     ngx_http_upstream_rr_peers_unlock(peers);
 
     while (++i < ctx->naddrs) {
-        ngx_http_upstream_zone_unmark_addr(&ctx->addrs[i]);
+        ngx_http_upstream_zone_unmark_addr(&addrs[i]);
+    }
+
+    if (addrs != ctx->addrs) {
+        ngx_free(addrs);
     }
 
     timer = (ngx_msec_t) 1000 * (ctx->valid > now ? ctx->valid - now + 1 : 1);
@@ -1031,4 +1120,175 @@ done:
     ngx_resolve_name_done(ctx);
 
     ngx_add_timer(event, timer);
+}
+
+
+static ngx_int_t
+ngx_http_upstream_zone_cmp_resolved(const void *one, const void *two)
+{
+    ngx_int_t              rc;
+    ngx_resolver_addr_t  *first, *second;
+
+    first = (ngx_resolver_addr_t *) one;
+    second = (ngx_resolver_addr_t *) two;
+
+    if (first->priority != second->priority) {
+        return (ngx_int_t) first->priority - (ngx_int_t) second->priority;
+    }
+
+    if (first->weight != second->weight) {
+        return (ngx_int_t) second->weight - (ngx_int_t) first->weight;
+    }
+
+    rc = ngx_memn2cmp(first->name.data, second->name.data,
+                      first->name.len, second->name.len);
+    if (rc != 0) {
+        return rc;
+    }
+
+    return ngx_http_upstream_zone_cmp_sockaddr(first->sockaddr, first->socklen,
+                                               second->sockaddr,
+                                               second->socklen);
+}
+
+
+static ngx_int_t
+ngx_http_upstream_zone_cmp_sockaddr(struct sockaddr *one, socklen_t one_len,
+    struct sockaddr *two, socklen_t two_len)
+{
+    in_port_t             p1, p2;
+    struct sockaddr_in   *sin1, *sin2;
+#if (NGX_HAVE_INET6)
+    ngx_int_t             rc;
+    struct sockaddr_in6  *sin61, *sin62;
+#endif
+
+    if (one->sa_family != two->sa_family) {
+        return (one->sa_family == AF_INET) ? -1 : 1;
+    }
+
+    switch (one->sa_family) {
+
+#if (NGX_HAVE_INET6)
+    case AF_INET6:
+        sin61 = (struct sockaddr_in6 *) one;
+        sin62 = (struct sockaddr_in6 *) two;
+
+        rc = ngx_memcmp(sin61->sin6_addr.s6_addr, sin62->sin6_addr.s6_addr,
+                        16);
+        if (rc != 0) {
+            return rc;
+        }
+
+        break;
+#endif
+
+    default: /* AF_INET */
+        sin1 = (struct sockaddr_in *) one;
+        sin2 = (struct sockaddr_in *) two;
+
+        if (sin1->sin_addr.s_addr != sin2->sin_addr.s_addr) {
+            return ntohl(sin1->sin_addr.s_addr)
+                   < ntohl(sin2->sin_addr.s_addr) ? -1 : 1;
+        }
+    }
+
+    p1 = ngx_inet_get_port(one);
+    p2 = ngx_inet_get_port(two);
+
+    if (p1 != p2) {
+        return (ngx_int_t) p1 - (ngx_int_t) p2;
+    }
+
+    return (ngx_int_t) one_len - (ngx_int_t) two_len;
+}
+
+
+static ngx_int_t
+ngx_http_upstream_zone_addr_match(ngx_http_upstream_rr_peer_t *peer,
+    ngx_http_upstream_rr_peer_t *template, ngx_http_upstream_host_t *host,
+    ngx_resolver_addr_t *addr)
+{
+    if (ngx_cmp_sockaddr(peer->sockaddr, peer->socklen,
+                         addr->sockaddr, addr->socklen,
+                         host->service.len != 0)
+        != NGX_OK)
+    {
+        return NGX_DECLINED;
+    }
+
+    if (host->service.len) {
+        if (addr->name.len != peer->server.len
+            || ngx_strncmp(addr->name.data, peer->server.data, addr->name.len))
+        {
+            return NGX_DECLINED;
+        }
+
+        if (template->weight == 1 && addr->weight != peer->weight) {
+            return NGX_DECLINED;
+        }
+    }
+
+    return NGX_OK;
+}
+
+
+static void
+ngx_http_upstream_zone_sort_peers(ngx_http_upstream_rr_peers_t *peers,
+    ngx_http_upstream_host_t *host, ngx_http_upstream_rr_peer_t *template,
+    ngx_resolver_addr_t *addrs, ngx_uint_t naddrs, ngx_uint_t backup,
+    u_short min_priority)
+{
+    ngx_uint_t                    i, addr_backup;
+    ngx_resolver_addr_t          *addr;
+    ngx_http_upstream_rr_peer_t  *peer, *next, *head, *resolved;
+    ngx_http_upstream_rr_peer_t **last, **rlast, **peerp;
+
+    head = NULL;
+    resolved = NULL;
+    last = &head;
+    rlast = &resolved;
+
+    for (peer = peers->peer; peer; peer = next) {
+        next = peer->next;
+        peer->next = NULL;
+
+        if (peer->host == host) {
+            *rlast = peer;
+            rlast = &peer->next;
+
+        } else {
+            *last = peer;
+            last = &peer->next;
+        }
+    }
+
+    for (i = 0; i < naddrs; i++) {
+        addr = &addrs[i];
+
+        addr_backup = (addr->priority != min_priority);
+        if (addr_backup != backup) {
+            continue;
+        }
+
+        for (peerp = &resolved; *peerp; peerp = &peer->next) {
+            peer = *peerp;
+
+            if (ngx_http_upstream_zone_addr_match(peer, template, host, addr)
+                != NGX_OK)
+            {
+                continue;
+            }
+
+            *peerp = peer->next;
+            peer->next = NULL;
+            *last = peer;
+            last = &peer->next;
+
+            break;
+        }
+    }
+
+    *last = resolved;
+    peers->peer = head;
 }

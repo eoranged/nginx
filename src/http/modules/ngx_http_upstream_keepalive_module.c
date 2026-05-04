@@ -8,6 +8,8 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <ngx_http_upstream_round_robin.h>
+#include <ngx_http_upstream_keepalive_module.h>
 
 
 typedef struct {
@@ -22,6 +24,7 @@ typedef struct {
     ngx_http_upstream_init_peer_pt     original_init_peer;
 
     ngx_uint_t                         local; /* unsigned  local:1; */
+    ngx_uint_t                         configured; /* unsigned  configured:1; */
 
 } ngx_http_upstream_keepalive_srv_conf_t;
 
@@ -151,6 +154,28 @@ ngx_module_t  ngx_http_upstream_keepalive_module = {
     NULL,                                  /* exit master */
     NGX_MODULE_V1_PADDING
 };
+
+
+ngx_uint_t
+ngx_http_upstream_keepalive_configured(ngx_http_upstream_srv_conf_t *us)
+{
+    ngx_http_upstream_keepalive_srv_conf_t   *kcf;
+
+    kcf = ngx_http_conf_upstream_srv_conf(us,
+                                          ngx_http_upstream_keepalive_module);
+
+    return kcf->configured && kcf->max_cached != 0;
+}
+
+
+ngx_int_t
+ngx_http_upstream_keepalive_get_peer_no_cache(ngx_peer_connection_t *pc,
+    void *data)
+{
+    ngx_http_upstream_keepalive_peer_data_t  *kp = data;
+
+    return kp->original_get_peer(pc, kp->data);
+}
 
 
 static ngx_int_t
@@ -380,6 +405,15 @@ ngx_http_upstream_free_keepalive_peer(ngx_peer_connection_t *pc, void *data,
 
 invalid:
 
+    if (kp->original_free_peer == ngx_http_upstream_free_round_robin_peer) {
+        ngx_peer_connection_t  rrp_pc;
+
+        rrp_pc = *pc;
+        rrp_pc.data = kp->data;
+
+        ngx_http_upstream_rr_peer_stats(&rrp_pc, u->state);
+    }
+
     kp->original_free_peer(pc, kp->data, state);
 }
 
@@ -507,6 +541,7 @@ ngx_http_upstream_keepalive_create_conf(ngx_conf_t *cf)
      *
      *     conf->original_init_peer = NULL;
      *     conf->local = 0;
+     *     conf->configured = 0;
      */
 
     conf->time = NGX_CONF_UNSET_MSEC;
@@ -605,6 +640,7 @@ ngx_http_upstream_keepalive(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     kcf->max_cached = n;
+    kcf->configured = 1;
 
     if (cf->args->nelts == 3) {
         if (ngx_strcmp(value[2].data, "local") == 0) {

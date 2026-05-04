@@ -8,6 +8,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <ngx_http_upstream_round_robin.h>
 
 
 #if (NGX_HTTP_CACHE)
@@ -177,6 +178,8 @@ static char *ngx_http_upstream(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy);
 static char *ngx_http_upstream_server(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 #if (NGX_HTTP_UPSTREAM_ZONE)
+static char *ngx_http_upstream_state(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static char *ngx_http_upstream_resolver(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 #endif
@@ -351,6 +354,13 @@ static ngx_command_t  ngx_http_upstream_commands[] = {
       NULL },
 
 #if (NGX_HTTP_UPSTREAM_ZONE)
+
+    { ngx_string("state"),
+      NGX_HTTP_UPS_CONF|NGX_CONF_TAKE1,
+      ngx_http_upstream_state,
+      NGX_HTTP_SRV_CONF_OFFSET,
+      0,
+      NULL },
 
     { ngx_string("resolver"),
       NGX_HTTP_UPS_CONF|NGX_CONF_1MORE,
@@ -855,6 +865,7 @@ static ngx_int_t
 ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 {
     ngx_int_t               rc;
+    ngx_uint_t              purge;
     ngx_http_cache_t       *c;
     ngx_http_file_cache_t  *cache;
 
@@ -862,7 +873,22 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
     if (c == NULL) {
 
-        if (!(r->method & u->conf->cache_methods)) {
+        purge = 0;
+
+        switch (ngx_http_test_predicates(r, u->conf->cache_purge)) {
+
+        case NGX_ERROR:
+            return NGX_ERROR;
+
+        case NGX_DECLINED:
+            purge = 1;
+            break;
+
+        default: /* NGX_OK */
+            break;
+        }
+
+        if (!purge && !(r->method & u->conf->cache_methods)) {
             return NGX_DECLINED;
         }
 
@@ -880,6 +906,8 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
             return NGX_ERROR;
         }
 
+        r->cache->file_cache = cache;
+
         if (u->create_key(r) != NGX_OK) {
             return NGX_ERROR;
         }
@@ -887,6 +915,17 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
         /* TODO: add keys */
 
         ngx_http_file_cache_create_key(r);
+
+        if (purge) {
+            rc = ngx_http_file_cache_purge(r);
+
+            if (rc == NGX_ERROR) {
+                return NGX_ERROR;
+            }
+
+            return (rc == NGX_OK) ? NGX_HTTP_NO_CONTENT
+                                  : NGX_HTTP_NOT_FOUND;
+        }
 
         if (r->cache->header_start + 256 > u->conf->buffer_size) {
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
@@ -905,7 +944,6 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
 
         c->body_start = u->conf->buffer_size;
         c->min_uses = u->conf->cache_min_uses;
-        c->file_cache = cache;
 
         switch (ngx_http_test_predicates(r, u->conf->cache_bypass)) {
 
@@ -3180,6 +3218,10 @@ ngx_http_upstream_process_headers(ngx_http_request_t *r, ngx_http_upstream_t *u)
     r->headers_out.status = u->headers_in.status_n;
     r->headers_out.status_line = u->headers_in.status_line;
 
+    if (u->state) {
+        u->state->status = u->headers_in.status_n;
+    }
+
     r->headers_out.content_length_n = u->headers_in.content_length_n;
 
     r->disable_not_modified = !u->cacheable;
@@ -4594,6 +4636,14 @@ ngx_http_upstream_next(ngx_http_request_t *r, ngx_http_upstream_t *u,
             state = NGX_PEER_FAILED;
         }
 
+        if (u->state->status == 0) {
+            u->state->status = u->headers_in.status_n;
+        }
+
+        if (u->peer.free == ngx_http_upstream_free_round_robin_peer) {
+            ngx_http_upstream_rr_peer_stats(&u->peer, u->state);
+        }
+
         u->peer.free(&u->peer, u->peer.data, state);
         u->peer.sockaddr = NULL;
 
@@ -4778,9 +4828,22 @@ ngx_http_upstream_finalize_request(ngx_http_request_t *r,
         }
     }
 
+    if (u->state && u->state->status == 0) {
+        if (u->headers_in.status_n) {
+            u->state->status = u->headers_in.status_n;
+
+        } else {
+            u->state->status = r->headers_out.status;
+        }
+    }
+
     u->finalize_request(r, rc);
 
     if (u->peer.free && u->peer.sockaddr) {
+        if (u->peer.free == ngx_http_upstream_free_round_robin_peer) {
+            ngx_http_upstream_rr_peer_stats(&u->peer, u->state);
+        }
+
         u->peer.free(&u->peer, u->peer.data, 0);
         u->peer.sockaddr = NULL;
 
@@ -6409,7 +6472,12 @@ ngx_http_upstream(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
         return rv;
     }
 
-    if (uscf->servers->nelts == 0) {
+    if (uscf->servers->nelts == 0
+#if (NGX_HTTP_UPSTREAM_ZONE)
+        && uscf->state.len == 0
+#endif
+        )
+    {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "no servers are inside upstream");
         return NGX_CONF_ERROR;
@@ -6709,20 +6777,91 @@ not_supported:
 #if (NGX_HTTP_UPSTREAM_ZONE)
 
 static char *
-ngx_http_upstream_resolver(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+ngx_http_upstream_state(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_http_upstream_srv_conf_t  *uscf = conf;
 
     ngx_str_t  *value;
+
+    if (uscf->state.data) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+    uscf->state = value[1];
+
+    if (ngx_conf_full_name(cf->cycle, &uscf->state, 0) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    return ngx_conf_parse(cf, &uscf->state);
+}
+
+
+static char *
+ngx_http_upstream_resolver(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_upstream_srv_conf_t  *uscf = conf;
+
+    u_char     *p, *last;
+    ngx_str_t  *resolver, *value, status_zone;
+    ngx_uint_t  i, j;
 
     if (uscf->resolver) {
         return "is duplicate";
     }
 
     value = cf->args->elts;
+    resolver = ngx_pnalloc(cf->pool, (cf->args->nelts - 1) * sizeof(ngx_str_t));
+    if (resolver == NULL) {
+        return NGX_CONF_ERROR;
+    }
 
-    uscf->resolver = ngx_resolver_create(cf, &value[1], cf->args->nelts - 1);
+    ngx_str_null(&status_zone);
+    j = 0;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+        if (value[i].len > sizeof("status_zone=") - 1
+            && ngx_strncmp(value[i].data, "status_zone=",
+                           sizeof("status_zone=") - 1)
+               == 0)
+        {
+            status_zone.len = value[i].len - (sizeof("status_zone=") - 1);
+            status_zone.data = value[i].data + sizeof("status_zone=") - 1;
+            continue;
+        }
+
+        resolver[j++] = value[i];
+    }
+
+    if (j == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "no resolver address is defined");
+        return NGX_CONF_ERROR;
+    }
+
+    if (status_zone.len) {
+        last = status_zone.data + status_zone.len;
+
+        for (p = status_zone.data; p < last; p++) {
+            if (*p < 0x20 || *p == '/' || *p == '"' || *p == '\\') {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "invalid resolver status zone name \"%V\"",
+                                   &status_zone);
+                return NGX_CONF_ERROR;
+            }
+        }
+    }
+
+    uscf->resolver = ngx_resolver_create(cf, resolver, j);
     if (uscf->resolver == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    if (status_zone.len
+        && ngx_resolver_status_zone(cf, uscf->resolver, &status_zone)
+           != NGX_CONF_OK)
+    {
         return NGX_CONF_ERROR;
     }
 

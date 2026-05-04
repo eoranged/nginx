@@ -71,12 +71,14 @@ HTTP_ADDITION=NO
 HTTP_DAV=NO
 HTTP_ACCESS=YES
 HTTP_AUTH_BASIC=YES
+HTTP_AUTH_JWT=YES
 HTTP_AUTH_REQUEST=NO
 HTTP_MIRROR=YES
 HTTP_USERID=YES
 HTTP_SLICE=NO
 HTTP_AUTOINDEX=YES
 HTTP_RANDOM_INDEX=NO
+HTTP_API=YES
 HTTP_STATUS=NO
 HTTP_GEO=YES
 HTTP_GEOIP=NO
@@ -106,8 +108,10 @@ HTTP_UPSTREAM_IP_HASH=YES
 HTTP_UPSTREAM_LEAST_CONN=YES
 HTTP_UPSTREAM_RANDOM=YES
 HTTP_UPSTREAM_KEEPALIVE=YES
+HTTP_UPSTREAM_NTLM=YES
 HTTP_UPSTREAM_ZONE=YES
 HTTP_UPSTREAM_STICKY=YES
+HTTP_UPSTREAM_HC=YES
 
 # STUB
 HTTP_STUB_STATUS=NO
@@ -134,6 +138,7 @@ STREAM_UPSTREAM_HASH=YES
 STREAM_UPSTREAM_LEAST_CONN=YES
 STREAM_UPSTREAM_RANDOM=YES
 STREAM_UPSTREAM_ZONE=YES
+STREAM_UPSTREAM_HC=YES
 STREAM_SSL_PREREAD=NO
 
 DYNAMIC_MODULES=
@@ -261,12 +266,14 @@ $0: warning: the \"--with-ipv6\" option is deprecated"
         --with-http_degradation_module)  HTTP_DEGRADATION=YES       ;;
         --with-http_slice_module)        HTTP_SLICE=YES             ;;
 
+        --without-http_api_module)       HTTP_API=NO                ;;
         --without-http_charset_module)   HTTP_CHARSET=NO            ;;
         --without-http_gzip_module)      HTTP_GZIP=NO               ;;
         --without-http_ssi_module)       HTTP_SSI=NO                ;;
         --without-http_userid_module)    HTTP_USERID=NO             ;;
         --without-http_access_module)    HTTP_ACCESS=NO             ;;
         --without-http_auth_basic_module) HTTP_AUTH_BASIC=NO        ;;
+        --without-http_auth_jwt_module)  HTTP_AUTH_JWT=NO           ;;
         --without-http_mirror_module)    HTTP_MIRROR=NO             ;;
         --without-http_autoindex_module) HTTP_AUTOINDEX=NO          ;;
         --without-http_status_module)    HTTP_STATUS=NO             ;;
@@ -292,8 +299,10 @@ $0: warning: the \"--with-ipv6\" option is deprecated"
         --without-http_upstream_random_module)
                                          HTTP_UPSTREAM_RANDOM=NO    ;;
         --without-http_upstream_keepalive_module) HTTP_UPSTREAM_KEEPALIVE=NO ;;
+        --without-http_upstream_ntlm_module) HTTP_UPSTREAM_NTLM=NO  ;;
         --without-http_upstream_zone_module) HTTP_UPSTREAM_ZONE=NO  ;;
         --without-http_upstream_sticky_module) HTTP_UPSTREAM_STICKY=NO ;;
+        --without-http_upstream_hc_module) HTTP_UPSTREAM_HC=NO      ;;
         --without-http_upstream_sticky)
             HTTP_UPSTREAM_STICKY=NO
             NGX_POST_CONF_MSG="$NGX_POST_CONF_MSG
@@ -356,6 +365,8 @@ use the \"--with-mail_ssl_module\" option instead"
                                          STREAM_UPSTREAM_RANDOM=NO  ;;
         --without-stream_upstream_zone_module)
                                          STREAM_UPSTREAM_ZONE=NO    ;;
+        --without-stream_upstream_hc_module)
+                                         STREAM_UPSTREAM_HC=NO      ;;
 
         --with-google_perftools_module)  NGX_GOOGLE_PERFTOOLS=YES   ;;
         --with-cpp_test_module)          NGX_CPP_TEST=YES           ;;
@@ -495,8 +506,10 @@ cat << END
   --without-http_userid_module       disable ngx_http_userid_module
   --without-http_access_module       disable ngx_http_access_module
   --without-http_auth_basic_module   disable ngx_http_auth_basic_module
+  --without-http_auth_jwt_module     disable ngx_http_auth_jwt_module
   --without-http_mirror_module       disable ngx_http_mirror_module
   --without-http_autoindex_module    disable ngx_http_autoindex_module
+  --without-http_api_module          disable ngx_http_api_module
   --without-http_geo_module          disable ngx_http_geo_module
   --without-http_map_module          disable ngx_http_map_module
   --without-http_split_clients_module disable ngx_http_split_clients_module
@@ -522,10 +535,14 @@ cat << END
                                      disable ngx_http_upstream_random_module
   --without-http_upstream_keepalive_module
                                      disable ngx_http_upstream_keepalive_module
+  --without-http_upstream_ntlm_module
+                                     disable ngx_http_upstream_ntlm_module
   --without-http_upstream_zone_module
                                      disable ngx_http_upstream_zone_module
   --without-http_upstream_sticky_module
                                      disable ngx_http_upstream_sticky_module
+  --without-http_upstream_hc_module
+                                     disable ngx_http_upstream_hc_module
 
   --with-http_perl_module            enable ngx_http_perl_module
   --with-http_perl_module=dynamic    enable dynamic ngx_http_perl_module
@@ -578,6 +595,8 @@ cat << END
                                      disable ngx_stream_upstream_random_module
   --without-stream_upstream_zone_module
                                      disable ngx_stream_upstream_zone_module
+  --without-stream_upstream_hc_module
+                                     disable ngx_stream_upstream_hc_module
 
   --with-google_perftools_module     enable ngx_google_perftools_module
   --with-cpp_test_module             enable ngx_cpp_test_module

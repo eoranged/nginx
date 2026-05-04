@@ -19,6 +19,7 @@
 #endif
 
 #define NGX_HTTP_UPSTREAM_FAILED     1
+#define NGX_HTTP_UPSTREAM_HC_DOWN    2
 
 #if (NGX_HTTP_UPSTREAM_STICKY)
 #define NGX_HTTP_UPSTREAM_DRAINING   8
@@ -56,6 +57,18 @@ struct ngx_http_upstream_rr_peer_s {
 
     ngx_uint_t                      conns;
     ngx_uint_t                      max_conns;
+
+    ngx_atomic_t                    requests;
+    ngx_atomic_t                    responses[5];
+    ngx_atomic_t                    sent;
+    ngx_atomic_t                    received;
+    ngx_atomic_t                    unavail;
+    ngx_msec_t                      header_time;
+    ngx_msec_t                      response_time;
+    ngx_atomic_t                    health_checks;
+    ngx_atomic_t                    health_fails;
+    ngx_atomic_t                    health_unhealthy;
+    ngx_uint_t                      health_last_passed;
 
     ngx_uint_t                      fails;
     time_t                          accessed;
@@ -103,6 +116,7 @@ struct ngx_http_upstream_rr_peers_s {
     ngx_slab_pool_t                *shpool;
     ngx_atomic_t                    rwlock;
     ngx_uint_t                     *config;
+    ngx_uint_t                      hc_active;
     ngx_http_upstream_rr_peer_t    *resolve;
     ngx_http_upstream_rr_peers_t   *zone_next;
 #endif
@@ -233,6 +247,7 @@ typedef struct {
     ngx_uint_t                      config;
     ngx_http_upstream_rr_peers_t   *peers;
     ngx_http_upstream_rr_peer_t    *current;
+    ngx_http_upstream_state_t      *state;
     uintptr_t                      *tried;
     uintptr_t                       data;
 } ngx_http_upstream_rr_peer_data_t;
@@ -248,6 +263,8 @@ ngx_int_t ngx_http_upstream_get_round_robin_peer(ngx_peer_connection_t *pc,
     void *data);
 void ngx_http_upstream_free_round_robin_peer(ngx_peer_connection_t *pc,
     void *data, ngx_uint_t state);
+void ngx_http_upstream_rr_peer_stats(ngx_peer_connection_t *pc,
+    ngx_http_upstream_state_t *state);
 
 #if (NGX_HTTP_SSL)
 ngx_int_t

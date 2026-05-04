@@ -936,6 +936,14 @@ ngx_cache_manager_process_handler(void)
 
             ngx_time_update();
         }
+
+        if (path[i]->purger) {
+            n = path[i]->purger(path[i]->data);
+
+            next = (n <= next) ? n : next;
+
+            ngx_time_update();
+        }
     }
 
     if (next == 0) {
