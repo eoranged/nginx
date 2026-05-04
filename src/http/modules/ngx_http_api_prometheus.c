@@ -7,7 +7,10 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+
+#if (NGX_HTTP_UPSTREAM_ZONE)
 #include <ngx_http_upstream_round_robin.h>
+#endif
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
 #include <ngx_stream.h>
@@ -24,8 +27,10 @@ static ngx_int_t ngx_http_api_prometheus_server_zones(
     ngx_http_api_prometheus_ctx_t *ctx);
 static ngx_int_t ngx_http_api_prometheus_resolvers(
     ngx_http_api_prometheus_ctx_t *ctx);
+#if (NGX_HTTP_UPSTREAM_ZONE || NGX_STREAM_UPSTREAM_ZONE)
 static ngx_int_t ngx_http_api_prometheus_resolver(
     ngx_http_api_prometheus_ctx_t *ctx, ngx_resolver_t *resolver);
+#endif
 static ngx_int_t ngx_http_api_prometheus_slabs(
     ngx_http_api_prometheus_ctx_t *ctx);
 
@@ -130,9 +135,12 @@ ngx_http_api_prometheus_create_buffer(ngx_http_request_t *r)
     ngx_list_part_t                 *part;
     ngx_shm_zone_t                  *shm_zone;
     ngx_http_api_main_conf_t        *amcf;
+
+#if (NGX_HTTP_UPSTREAM_ZONE)
     ngx_http_upstream_rr_peers_t    *peers;
     ngx_http_upstream_srv_conf_t   **uscfp;
     ngx_http_upstream_main_conf_t   *umcf;
+#endif
 
     size = 16384;
 
@@ -163,6 +171,7 @@ ngx_http_api_prometheus_create_buffer(ngx_http_request_t *r)
         shm_zone = part->elts;
     }
 
+#if (NGX_HTTP_UPSTREAM_ZONE)
     umcf = ngx_http_cycle_get_module_main_conf(((ngx_cycle_t *) ngx_cycle),
                                                ngx_http_upstream_module);
     if (umcf) {
@@ -178,6 +187,7 @@ ngx_http_api_prometheus_create_buffer(ngx_http_request_t *r)
                     * (1024 + uscfp[i]->host.len * 4);
         }
     }
+#endif
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
     {
@@ -285,26 +295,31 @@ ngx_http_api_prometheus_server_zones(ngx_http_api_prometheus_ctx_t *pmctx)
 static ngx_int_t
 ngx_http_api_prometheus_resolvers(ngx_http_api_prometheus_ctx_t *ctx)
 {
-    ngx_uint_t                       i;
-    ngx_http_upstream_srv_conf_t   **uscfp;
-    ngx_http_upstream_main_conf_t   *umcf;
+#if (NGX_HTTP_UPSTREAM_ZONE)
+    {
+        ngx_uint_t                       i;
+        ngx_http_upstream_srv_conf_t   **uscfp;
+        ngx_http_upstream_main_conf_t   *umcf;
 
-    umcf = ngx_http_cycle_get_module_main_conf((ngx_cycle_t *) ngx_cycle,
-                                               ngx_http_upstream_module);
-    if (umcf) {
-        uscfp = umcf->upstreams.elts;
+        umcf = ngx_http_cycle_get_module_main_conf((ngx_cycle_t *) ngx_cycle,
+                                                   ngx_http_upstream_module);
+        if (umcf) {
+            uscfp = umcf->upstreams.elts;
 
-        for (i = 0; i < umcf->upstreams.nelts; i++) {
-            if (ngx_http_api_prometheus_resolver(ctx, uscfp[i]->resolver)
-                != NGX_OK)
-            {
-                return NGX_ERROR;
+            for (i = 0; i < umcf->upstreams.nelts; i++) {
+                if (ngx_http_api_prometheus_resolver(ctx, uscfp[i]->resolver)
+                    != NGX_OK)
+                {
+                    return NGX_ERROR;
+                }
             }
         }
     }
+#endif
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
     {
+        ngx_uint_t                         i;
         ngx_stream_upstream_srv_conf_t   **suscfp;
         ngx_stream_upstream_main_conf_t   *sumcf;
 
@@ -328,6 +343,8 @@ ngx_http_api_prometheus_resolvers(ngx_http_api_prometheus_ctx_t *ctx)
     return NGX_OK;
 }
 
+
+#if (NGX_HTTP_UPSTREAM_ZONE || NGX_STREAM_UPSTREAM_ZONE)
 
 static ngx_int_t
 ngx_http_api_prometheus_resolver(ngx_http_api_prometheus_ctx_t *ctx,
@@ -380,6 +397,9 @@ ngx_http_api_prometheus_resolver(ngx_http_api_prometheus_ctx_t *ctx,
 
     return NGX_OK;
 }
+
+
+#endif
 
 
 static ngx_int_t

@@ -83,13 +83,15 @@ static ngx_int_t ngx_stream_upstream_hc_init_worker(ngx_cycle_t *cycle);
 static void ngx_stream_upstream_hc_exit_worker(ngx_cycle_t *cycle);
 static void ngx_stream_upstream_hc_clear_stale(ngx_cycle_t *cycle,
     ngx_stream_upstream_hc_main_conf_t *hmcf);
+#if (NGX_STREAM_UPSTREAM_ZONE)
 static ngx_stream_upstream_hc_conf_t *ngx_stream_upstream_hc_find_check(
     ngx_stream_upstream_hc_main_conf_t *hmcf,
     ngx_stream_upstream_srv_conf_t *uscf);
-static ngx_int_t ngx_stream_upstream_hc_has_resolve(
-    ngx_stream_upstream_srv_conf_t *uscf);
 static ngx_uint_t ngx_stream_upstream_hc_active_peers(
     ngx_stream_upstream_rr_peers_t *peers);
+#endif
+static ngx_int_t ngx_stream_upstream_hc_has_resolve(
+    ngx_stream_upstream_srv_conf_t *uscf);
 static void ngx_stream_upstream_hc_clear_peers(
     ngx_stream_upstream_rr_peers_t *peers);
 static ngx_int_t ngx_stream_upstream_hc_start_peers(ngx_cycle_t *cycle,
@@ -130,7 +132,7 @@ static ngx_command_t  ngx_stream_upstream_hc_commands[] = {
       NULL },
 
     { ngx_string("health_check"),
-      NGX_STREAM_SRV_CONF|NGX_CONF_1MORE,
+      NGX_STREAM_SRV_CONF|NGX_CONF_ANY,
       ngx_stream_upstream_hc,
       NGX_STREAM_SRV_CONF_OFFSET,
       0,
@@ -595,9 +597,11 @@ ngx_stream_upstream_hc_clear_stale(ngx_cycle_t *cycle,
     ngx_stream_upstream_hc_main_conf_t *hmcf)
 {
     ngx_uint_t                         i;
-    ngx_stream_upstream_hc_conf_t     *hc;
     ngx_stream_upstream_srv_conf_t    *uscf, **uscfp;
     ngx_stream_upstream_main_conf_t   *umcf;
+#if (NGX_STREAM_UPSTREAM_ZONE)
+    ngx_stream_upstream_hc_conf_t     *hc;
+#endif
 
     umcf = ngx_stream_cycle_get_module_main_conf(cycle,
                                                  ngx_stream_upstream_module);
@@ -614,9 +618,9 @@ ngx_stream_upstream_hc_clear_stale(ngx_cycle_t *cycle,
             continue;
         }
 
+#if (NGX_STREAM_UPSTREAM_ZONE)
         hc = ngx_stream_upstream_hc_find_check(hmcf, uscf);
 
-#if (NGX_STREAM_UPSTREAM_ZONE)
         if (hc && hc->persistent && uscf->shm_zone
             && (uscf->shm_zone->shm.exists
                 || ngx_stream_upstream_hc_active_peers(uscf->peer.data)))
@@ -629,6 +633,8 @@ ngx_stream_upstream_hc_clear_stale(ngx_cycle_t *cycle,
     }
 }
 
+
+#if (NGX_STREAM_UPSTREAM_ZONE)
 
 static ngx_stream_upstream_hc_conf_t *
 ngx_stream_upstream_hc_find_check(ngx_stream_upstream_hc_main_conf_t *hmcf,
@@ -647,6 +653,8 @@ ngx_stream_upstream_hc_find_check(ngx_stream_upstream_hc_main_conf_t *hmcf,
 
     return NULL;
 }
+
+#endif
 
 
 static ngx_int_t
@@ -673,6 +681,8 @@ ngx_stream_upstream_hc_has_resolve(ngx_stream_upstream_srv_conf_t *uscf)
 }
 
 
+#if (NGX_STREAM_UPSTREAM_ZONE)
+
 static ngx_uint_t
 ngx_stream_upstream_hc_active_peers(ngx_stream_upstream_rr_peers_t *peers)
 {
@@ -689,6 +699,8 @@ ngx_stream_upstream_hc_active_peers(ngx_stream_upstream_rr_peers_t *peers)
 
     return 0;
 }
+
+#endif
 
 
 static void

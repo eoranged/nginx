@@ -7,7 +7,10 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+
+#if (NGX_HTTP_UPSTREAM_ZONE)
 #include <ngx_http_upstream_round_robin.h>
+#endif
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
 #include <ngx_stream.h>
@@ -16,6 +19,8 @@
 
 #include "ngx_http_api_module.h"
 
+
+#if (NGX_HTTP_UPSTREAM_ZONE || NGX_STREAM_UPSTREAM_ZONE)
 
 typedef struct {
     ngx_str_t                     server;
@@ -47,6 +52,10 @@ typedef struct {
 } ngx_http_api_peer_conf_t;
 
 
+#endif
+
+
+#if (NGX_HTTP_UPSTREAM_ZONE)
 static ngx_int_t ngx_http_api_http_upstreams(ngx_http_request_t *r);
 static ngx_int_t ngx_http_api_http_upstream(ngx_http_request_t *r,
     ngx_str_t *path);
@@ -105,6 +114,7 @@ static ngx_int_t ngx_http_api_http_move_peer(
     ngx_http_upstream_rr_peer_t *peer, ngx_uint_t backup);
 static void ngx_http_api_http_unlink_peer(
     ngx_http_upstream_rr_peers_t *peers, ngx_http_upstream_rr_peer_t *peer);
+#endif
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
 static ngx_int_t ngx_http_api_stream_upstreams(ngx_http_request_t *r);
@@ -167,6 +177,9 @@ static void ngx_http_api_stream_unlink_peer(
     ngx_stream_upstream_rr_peers_t *peers, ngx_stream_upstream_rr_peer_t *peer);
 #endif
 
+#if (NGX_HTTP_UPSTREAM_ZONE || NGX_STREAM_UPSTREAM_ZONE)
+static ngx_int_t ngx_http_api_state_save(ngx_pool_t *pool, ngx_log_t *log,
+    ngx_str_t *state, u_char *data, size_t len);
 static ngx_int_t ngx_http_api_parse_json(ngx_http_request_t *r,
     ngx_http_api_peer_conf_t *pcf, ngx_uint_t post);
 static ngx_int_t ngx_http_api_json_string(u_char **pos, u_char *last,
@@ -184,11 +197,13 @@ static ngx_buf_t *ngx_http_api_upstream_buffer(ngx_http_request_t *r,
     ngx_uint_t peers);
 static ngx_int_t ngx_http_api_valid_label(ngx_str_t *name);
 static u_char *ngx_http_api_time(u_char *p, ngx_msec_t msec);
+#endif
 
 
 ngx_int_t
 ngx_http_api_upstreams(ngx_http_request_t *r)
 {
+#if (NGX_HTTP_UPSTREAM_ZONE)
     if (r->uri.len >= sizeof("/api/9/http/upstreams") - 1
         && ngx_strncmp(r->uri.data, "/api/9/http/upstreams",
                        sizeof("/api/9/http/upstreams") - 1)
@@ -196,6 +211,7 @@ ngx_http_api_upstreams(ngx_http_request_t *r)
     {
         return ngx_http_api_http_upstreams(r);
     }
+#endif
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
     if (r->uri.len >= sizeof("/api/9/stream/upstreams") - 1
@@ -214,6 +230,7 @@ ngx_http_api_upstreams(ngx_http_request_t *r)
 ngx_int_t
 ngx_http_api_prometheus_upstreams(ngx_http_api_prometheus_ctx_t *ctx)
 {
+#if (NGX_HTTP_UPSTREAM_ZONE)
     ngx_uint_t                       i;
     ngx_http_upstream_rr_peer_t     *peer;
     ngx_http_upstream_rr_peers_t    *peers;
@@ -256,9 +273,11 @@ ngx_http_api_prometheus_upstreams(ngx_http_api_prometheus_ctx_t *ctx)
             ngx_http_api_http_peers_unlock(peers);
         }
     }
+#endif
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
     {
+        ngx_uint_t                         i;
         ngx_stream_upstream_rr_peer_t     *speer;
         ngx_stream_upstream_rr_peers_t    *speers;
         ngx_stream_upstream_srv_conf_t   **suscfp;
@@ -315,6 +334,7 @@ ngx_http_api_prometheus_upstreams(ngx_http_api_prometheus_ctx_t *ctx)
 ngx_int_t
 ngx_http_api_validate_upstream_names(ngx_conf_t *cf)
 {
+#if (NGX_HTTP_UPSTREAM_ZONE)
     ngx_uint_t                       i;
     ngx_str_t                       *server;
     ngx_http_upstream_rr_peer_t     *peer;
@@ -364,9 +384,12 @@ ngx_http_api_validate_upstream_names(ngx_conf_t *cf)
             }
         }
     }
+#endif
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
     {
+        ngx_uint_t                         i;
+        ngx_str_t                         *server;
         ngx_stream_upstream_rr_peer_t     *speer;
         ngx_stream_upstream_rr_peers_t    *speers;
         ngx_stream_upstream_srv_conf_t   **suscfp;
@@ -425,6 +448,8 @@ ngx_http_api_validate_upstream_names(ngx_conf_t *cf)
     return NGX_OK;
 }
 
+
+#if (NGX_HTTP_UPSTREAM_ZONE)
 
 static ngx_int_t
 ngx_http_api_http_upstreams(ngx_http_request_t *r)
@@ -1207,9 +1232,7 @@ ngx_http_api_http_state_save(ngx_http_request_t *r,
     ngx_http_upstream_srv_conf_t *uscf)
 {
     size_t                         len;
-    ssize_t                        n;
     u_char                        *p, *start;
-    ngx_file_t                     file;
     ngx_http_upstream_rr_peer_t   *peer;
     ngx_http_upstream_rr_peers_t  *peers;
 
@@ -1249,41 +1272,8 @@ ngx_http_api_http_state_save(ngx_http_request_t *r,
 
     len = p ? (size_t) (p - start) : 0;
 
-    ngx_memzero(&file, sizeof(ngx_file_t));
-
-    file.name = uscf->state;
-    file.log = r->connection->log;
-    file.fd = ngx_open_file(uscf->state.data, NGX_FILE_WRONLY,
-                            NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS);
-
-    if (file.fd == NGX_INVALID_FILE) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
-                      ngx_open_file_n " \"%V\" failed", &uscf->state);
-        return NGX_ERROR;
-    }
-
-    if (len) {
-        n = ngx_write_file(&file, start, len, 0);
-
-        if (n == NGX_ERROR || (size_t) n != len) {
-            if (n != NGX_ERROR) {
-                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                              ngx_write_fd_n " \"%V\" wrote only %z of %uz",
-                              &uscf->state, n, len);
-            }
-
-            (void) ngx_close_file(file.fd);
-            return NGX_ERROR;
-        }
-    }
-
-    if (ngx_close_file(file.fd) == NGX_FILE_ERROR) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
-                      ngx_close_file_n " \"%V\" failed", &uscf->state);
-        return NGX_ERROR;
-    }
-
-    return NGX_OK;
+    return ngx_http_api_state_save(r->pool, r->connection->log, &uscf->state,
+                                   start, len);
 }
 
 
@@ -1663,6 +1653,8 @@ ngx_http_api_http_unlink_peer(ngx_http_upstream_rr_peers_t *peers,
         }
     }
 }
+
+#endif
 
 
 #if (NGX_STREAM_UPSTREAM_ZONE)
@@ -2413,9 +2405,7 @@ ngx_http_api_stream_state_save(ngx_http_request_t *r,
     ngx_stream_upstream_srv_conf_t *uscf)
 {
     size_t                           len;
-    ssize_t                          n;
     u_char                          *p, *start;
-    ngx_file_t                       file;
     ngx_stream_upstream_rr_peer_t   *peer;
     ngx_stream_upstream_rr_peers_t  *peers;
 
@@ -2455,41 +2445,8 @@ ngx_http_api_stream_state_save(ngx_http_request_t *r,
 
     len = p ? (size_t) (p - start) : 0;
 
-    ngx_memzero(&file, sizeof(ngx_file_t));
-
-    file.name = uscf->state;
-    file.log = r->connection->log;
-    file.fd = ngx_open_file(uscf->state.data, NGX_FILE_WRONLY,
-                            NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS);
-
-    if (file.fd == NGX_INVALID_FILE) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
-                      ngx_open_file_n " \"%V\" failed", &uscf->state);
-        return NGX_ERROR;
-    }
-
-    if (len) {
-        n = ngx_write_file(&file, start, len, 0);
-
-        if (n == NGX_ERROR || (size_t) n != len) {
-            if (n != NGX_ERROR) {
-                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                              ngx_write_fd_n " \"%V\" wrote only %z of %uz",
-                              &uscf->state, n, len);
-            }
-
-            (void) ngx_close_file(file.fd);
-            return NGX_ERROR;
-        }
-    }
-
-    if (ngx_close_file(file.fd) == NGX_FILE_ERROR) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
-                      ngx_close_file_n " \"%V\" failed", &uscf->state);
-        return NGX_ERROR;
-    }
-
-    return NGX_OK;
+    return ngx_http_api_state_save(r->pool, r->connection->log, &uscf->state,
+                                   start, len);
 }
 
 
@@ -2814,6 +2771,76 @@ ngx_http_api_stream_unlink_peer(ngx_stream_upstream_rr_peers_t *peers,
 }
 
 #endif
+
+
+#if (NGX_HTTP_UPSTREAM_ZONE || NGX_STREAM_UPSTREAM_ZONE)
+
+static ngx_int_t
+ngx_http_api_state_save(ngx_pool_t *pool, ngx_log_t *log, ngx_str_t *state,
+    u_char *data, size_t len)
+{
+    u_char                *p;
+    ssize_t                n;
+    ngx_str_t              temp;
+    ngx_file_t             file;
+    ngx_ext_rename_file_t  ext;
+
+    temp.len = state->len + sizeof(".") - 1 + NGX_INT_T_LEN
+               + sizeof(".") - 1 + NGX_ATOMIC_T_LEN + sizeof(".tmp") - 1;
+
+    temp.data = ngx_pnalloc(pool, temp.len + 1);
+    if (temp.data == NULL) {
+        return NGX_ERROR;
+    }
+
+    p = ngx_sprintf(temp.data, "%V.%P.%uA.tmp%Z", state, ngx_pid,
+                    ngx_next_temp_number(0));
+    temp.len = p - temp.data;
+
+    ngx_memzero(&file, sizeof(ngx_file_t));
+
+    file.name = temp;
+    file.log = log;
+    file.fd = ngx_open_file(temp.data, NGX_FILE_WRONLY, NGX_FILE_TRUNCATE,
+                            NGX_FILE_DEFAULT_ACCESS);
+
+    if (file.fd == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      ngx_open_file_n " \"%V\" failed", &temp);
+        return NGX_ERROR;
+    }
+
+    if (len) {
+        n = ngx_write_file(&file, data, len, 0);
+
+        if (n == NGX_ERROR || (size_t) n != len) {
+            if (n != NGX_ERROR) {
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              ngx_write_fd_n " \"%V\" wrote only %z of %uz",
+                              &temp, n, len);
+            }
+
+            (void) ngx_close_file(file.fd);
+            (void) ngx_delete_file(temp.data);
+            return NGX_ERROR;
+        }
+    }
+
+    if (ngx_close_file(file.fd) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      ngx_close_file_n " \"%V\" failed", &temp);
+        (void) ngx_delete_file(temp.data);
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(&ext, sizeof(ngx_ext_rename_file_t));
+    ext.access = NGX_FILE_DEFAULT_ACCESS;
+    ext.time = -1;
+    ext.log = log;
+    ext.delete_file = 1;
+
+    return ngx_ext_rename_file(&temp, state, &ext);
+}
 
 
 static ngx_int_t
@@ -3215,3 +3242,5 @@ ngx_http_api_time(u_char *p, ngx_msec_t msec)
 
     return ngx_sprintf(p, "%Mms", msec);
 }
+
+#endif

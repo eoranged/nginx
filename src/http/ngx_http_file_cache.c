@@ -100,6 +100,9 @@ static ngx_int_t ngx_http_file_cache_read_key(ngx_str_t *name, ngx_str_t *key,
 static ngx_int_t ngx_http_file_cache_delete_path(u_char *name, ngx_log_t *log);
 static ngx_int_t ngx_http_file_cache_purge_node(ngx_http_file_cache_t *cache,
     u_char *key, u_char *name);
+static ngx_int_t ngx_http_file_cache_purge_node_file(
+    ngx_http_file_cache_t *cache,
+    ngx_http_file_cache_node_t *fcn, u_char *name, ngx_log_t *log);
 static ngx_int_t ngx_http_file_cache_purge_variant(ngx_http_request_t *r,
     ngx_http_cache_t *c, u_char *variant);
 static ngx_int_t ngx_http_file_cache_purge_one(ngx_http_request_t *r,
@@ -467,17 +470,14 @@ ngx_http_file_cache_purge_one(ngx_http_request_t *r, ngx_http_cache_t *c)
     }
 
     if (fcn->exists) {
-        rc = ngx_http_file_cache_delete_path(c->file.name.data,
-                                             r->connection->log);
+        rc = ngx_http_file_cache_purge_node_file(cache, fcn,
+                                                 c->file.name.data,
+                                                 r->connection->log);
 
         if (rc == NGX_ERROR) {
             ngx_shmtx_unlock(&cache->shpool->mutex);
             return NGX_ERROR;
         }
-
-        cache->sh->size -= fcn->fs_size;
-        fcn->fs_size = 0;
-        fcn->exists = 0;
     }
 
     if (fcn->count == 0) {
@@ -2589,16 +2589,13 @@ ngx_http_file_cache_purge_node(ngx_http_file_cache_t *cache, u_char *key,
     }
 
     if (fcn->exists) {
-        rc = ngx_http_file_cache_delete_path(name, ngx_cycle->log);
+        rc = ngx_http_file_cache_purge_node_file(cache, fcn, name,
+                                                 ngx_cycle->log);
 
         if (rc == NGX_ERROR) {
             ngx_shmtx_unlock(&cache->shpool->mutex);
             return NGX_ERROR;
         }
-
-        cache->sh->size -= fcn->fs_size;
-        fcn->fs_size = 0;
-        fcn->exists = 0;
     }
 
     if (fcn->count == 0) {
@@ -2618,6 +2615,36 @@ ngx_http_file_cache_purge_node(ngx_http_file_cache_t *cache, u_char *key,
     ngx_shmtx_unlock(&cache->shpool->mutex);
 
     return NGX_AGAIN;
+}
+
+
+static ngx_int_t
+ngx_http_file_cache_purge_node_file(ngx_http_file_cache_t *cache,
+    ngx_http_file_cache_node_t *fcn, u_char *name, ngx_log_t *log)
+{
+    ngx_int_t  rc;
+
+    fcn->count++;
+    fcn->deleting = 1;
+    ngx_shmtx_unlock(&cache->shpool->mutex);
+
+    rc = ngx_http_file_cache_delete_path(name, log);
+
+    ngx_shmtx_lock(&cache->shpool->mutex);
+    fcn->count--;
+    fcn->deleting = 0;
+
+    if (rc == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+
+    if (fcn->exists) {
+        cache->sh->size -= fcn->fs_size;
+        fcn->fs_size = 0;
+        fcn->exists = 0;
+    }
+
+    return NGX_OK;
 }
 
 
